@@ -64,6 +64,7 @@ Create users manually and sign in at `/login.html`.
 
 ```bash
 npm run create:user -- username password
+npm run password:user -- username newpassword
 ```
 
 If you already have data, the auth migration requires assigning `userId` values. For a clean start, reset the SQLite database and re-run migrations.
