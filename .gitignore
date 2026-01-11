@@ -8,8 +8,11 @@ yarn-error.log*
 pnpm-debug.log*
 
 # Prisma
-prisma/
+prisma/*.db
+prisma/*.db-journal
 !prisma/schema.prisma
+!prisma/migrations/
+!prisma/migrations/**
 
 # Build output
 dist/
