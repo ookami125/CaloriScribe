@@ -25,3 +25,5 @@ certs/
 # OS files
 .DS_Store
 Thumbs.db
+
+backup/

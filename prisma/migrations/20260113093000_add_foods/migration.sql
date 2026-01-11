@@ -31,9 +31,6 @@ CREATE TABLE "Food" (
     CONSTRAINT "Food_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
--- AlterTable
-ALTER TABLE "LogEntry" ADD COLUMN "foodId" INTEGER;
-
 -- CreateIndex
 CREATE INDEX "Food_userId_idx" ON "Food"("userId");
 
