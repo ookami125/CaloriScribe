@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CaloriScribe Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=Space+Grotesk:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="ambient"></div>
+    <header class="site-header">
+      <div class="brand">CaloriScribe</div>
+      <button
+        class="nav-toggle"
+        type="button"
+        data-nav-toggle
+        aria-expanded="false"
+        aria-controls="site-nav"
+      >
+        <span class="nav-toggle-icon" aria-hidden="true"></span>
+        <span class="nav-toggle-label">Menu</span>
+      </button>
+      <nav class="nav-links" id="site-nav">
+        <a class="active" href="index.html">Dashboard</a>
+        <a href="ingredients.html">Ingredients</a>
+        <a href="recipes.html">Recipes</a>
+        <a href="log.html">Log Intake</a>
+      </nav>
+    </header>
+
+    <main class="page">
+      <section class="panel hero">
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Day view</p>
+            <h1>Daily overview</h1>
+            <p class="subtitle">
+              Track calories and macros at a glance, then dive into details when
+              you need them.
+            </p>
+          </div>
+          <div class="hero-actions">
+            <div class="date-controls">
+              <button
+                class="ghost day-nav"
+                type="button"
+                data-day-action="prev"
+                aria-label="Previous day"
+              >
+                Prev
+              </button>
+              <label class="date-picker">
+                Day
+                <input type="date" id="day-selector" data-day-input />
+              </label>
+              <button
+                class="ghost day-nav"
+                type="button"
+                data-day-action="next"
+                aria-label="Next day"
+              >
+                Next
+              </button>
+              <button class="ghost" type="button" data-day-action="today">
+                Today
+              </button>
+            </div>
+            <a class="primary button-link" href="ingredients.html">
+              Add ingredient
+            </a>
+            <a class="ghost button-link" href="log.html">Log intake</a>
+          </div>
+        </div>
+        <div class="hero-grid">
+          <div class="stat-card">
+            <span class="eyebrow">Calories</span>
+            <h2 id="today-calories">0</h2>
+            <div class="progress">
+              <div class="progress-bar" id="calories-progress"></div>
+            </div>
+            <span class="meta" id="calories-target">Target not set</span>
+          </div>
+          <div class="stat-card">
+            <span class="eyebrow">Macro split</span>
+            <div class="macro-grid">
+              <div class="macro-item">
+                <h3 id="today-protein">0g</h3>
+                <div class="progress small">
+                  <div class="progress-bar" id="protein-progress"></div>
+                </div>
+                <span class="meta" id="protein-target">Protein</span>
+              </div>
+              <div class="macro-item">
+                <h3 id="today-carbs">0g</h3>
+                <div class="progress small">
+                  <div class="progress-bar" id="carbs-progress"></div>
+                </div>
+                <span class="meta" id="carbs-target">Carbs</span>
+              </div>
+              <div class="macro-item">
+                <h3 id="today-fat">0g</h3>
+                <div class="progress small">
+                  <div class="progress-bar" id="fat-progress"></div>
+                </div>
+                <span class="meta" id="fat-target">Fat</span>
+              </div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <span class="eyebrow">Quick actions</span>
+            <div class="stack">
+              <a class="ghost button-link" href="ingredients.html">
+                Scan or lookup
+              </a>
+              <a class="ghost button-link" href="recipes.html">
+                Build recipe
+              </a>
+              <a class="ghost button-link" href="log.html">Log meal</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Daily targets</h2>
+            <p>Set your daily limits to see progress bars update instantly.</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <form id="target-form" class="stacked-card">
+            <h3>Targets</h3>
+            <div class="grid two">
+              <label>
+                Calories
+                <input name="calories" type="number" step="0.01" />
+              </label>
+              <label>
+                Protein (g)
+                <input name="protein" type="number" step="0.01" />
+              </label>
+              <label>
+                Carbs (g)
+                <input name="carbs" type="number" step="0.01" />
+              </label>
+              <label>
+                Fat (g)
+                <input name="fat" type="number" step="0.01" />
+              </label>
+            </div>
+            <button class="primary" type="submit">Save targets</button>
+            <p class="form-status" id="target-status"></p>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Recent intake</h2>
+            <p>Most recent entries for the selected day.</p>
+          </div>
+          <a class="ghost button-link" href="log.html">View all logs</a>
+        </div>
+        <div class="list" id="log-list" data-limit="5"></div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>All data is stored in your connected database. SQLite is default.</p>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Recipe Builder</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=Space+Grotesk:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="ambient"></div>
+    <header class="site-header">
+      <div class="brand">CaloriScribe</div>
+      <button
+        class="nav-toggle"
+        type="button"
+        data-nav-toggle
+        aria-expanded="false"
+        aria-controls="site-nav"
+      >
+        <span class="nav-toggle-icon" aria-hidden="true"></span>
+        <span class="nav-toggle-label">Menu</span>
+      </button>
+      <nav class="nav-links" id="site-nav">
+        <a href="index.html">Dashboard</a>
+        <a href="ingredients.html">Ingredients</a>
+        <a class="active" href="recipes.html">Recipes</a>
+        <a href="log.html">Log Intake</a>
+      </nav>
+    </header>
+
+    <main class="page">
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h1>Recipe builder</h1>
+            <p>Combine ingredients and check macros before you log.</p>
+          </div>
+        </div>
+        <div class="panel-body split">
+          <form id="recipe-form" class="stacked-card">
+            <h3>Create recipe</h3>
+            <div class="grid two">
+              <label>
+                Recipe name
+                <input name="name" type="text" required />
+              </label>
+              <label>
+                Servings
+                <input name="servings" type="number" min="1" value="1" />
+              </label>
+            </div>
+            <label>
+              Notes
+              <textarea name="notes" rows="3"></textarea>
+            </label>
+            <div class="recipe-items" id="recipe-items"></div>
+            <button class="ghost" type="button" id="add-recipe-item">
+              Add ingredient
+            </button>
+            <button class="primary" type="submit">Save recipe</button>
+            <p class="form-status" id="recipe-status"></p>
+          </form>
+          <div>
+            <div class="list scroll" id="recipe-list"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
