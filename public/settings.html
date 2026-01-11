@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Recipe Builder</title>
+    <title>Settings</title>
     <link rel="icon" href="favicons/favicon.ico" sizes="any" />
     <link
       rel="icon"
@@ -96,9 +96,9 @@
       <nav class="nav-links" id="site-nav">
         <a href="index.html">Dashboard</a>
         <a href="ingredients.html">Ingredients</a>
-        <a class="active" href="recipes.html">Recipes</a>
+        <a href="recipes.html">Recipes</a>
         <a href="log.html">Log Intake</a>
-        <a href="settings.html">Settings</a>
+        <a class="active" href="settings.html">Settings</a>
         <button class="nav-logout" id="logout-button" type="button">
           Log out
         </button>
@@ -109,37 +109,89 @@
       <section class="panel">
         <div class="panel-header">
           <div>
-            <h1>Recipe builder</h1>
-            <p>Combine ingredients and check macros before you log.</p>
+            <h1>Settings</h1>
+            <p>Manage targets, data tools, and security.</p>
           </div>
         </div>
         <div class="panel-body split">
-          <form id="recipe-form" class="stacked-card">
-            <h3>Create recipe</h3>
+          <form id="target-form" class="stacked-card">
+            <h3>Daily targets</h3>
             <div class="grid two">
               <label>
-                Recipe name
-                <input name="name" type="text" required />
+                Calories
+                <input name="calories" type="number" step="0.01" />
               </label>
               <label>
-                Servings
-                <input name="servings" type="number" min="1" value="1" />
+                Protein (g)
+                <input name="protein" type="number" step="0.01" />
+              </label>
+              <label>
+                Carbs (g)
+                <input name="carbs" type="number" step="0.01" />
+              </label>
+              <label>
+                Fat (g)
+                <input name="fat" type="number" step="0.01" />
               </label>
             </div>
-            <label>
-              Notes
-              <textarea name="notes" rows="3"></textarea>
-            </label>
-            <div class="recipe-items" id="recipe-items"></div>
-            <button class="ghost" type="button" id="add-recipe-item">
-              Add ingredient
-            </button>
-            <button class="primary" type="submit">Save recipe</button>
-            <p class="form-status" id="recipe-status"></p>
+            <button class="primary" type="submit">Save targets</button>
+            <p class="form-status" id="target-status"></p>
           </form>
-          <div>
-            <div class="list scroll" id="recipe-list"></div>
+
+          <div class="stacked-card">
+            <h3>Data tools</h3>
+            <p class="meta">
+              Export your data or import a previous backup.
+            </p>
+            <div class="actions">
+              <button class="ghost" type="button" id="export-button">
+                Export data
+              </button>
+              <button class="ghost" type="button" id="import-button">
+                Import data
+              </button>
+              <input
+                id="import-file"
+                type="file"
+                accept="application/json"
+                hidden
+              />
+            </div>
+            <p class="form-status" id="import-status"></p>
           </div>
+
+          <form id="password-form" class="stacked-card">
+            <h3>Change password</h3>
+            <label>
+              Current password
+              <input
+                name="oldPassword"
+                type="password"
+                autocomplete="current-password"
+                required
+              />
+            </label>
+            <label>
+              New password
+              <input
+                name="newPassword"
+                type="password"
+                autocomplete="new-password"
+                required
+              />
+            </label>
+            <label>
+              Confirm new password
+              <input
+                name="confirmPassword"
+                type="password"
+                autocomplete="new-password"
+                required
+              />
+            </label>
+            <button class="primary" type="submit">Update password</button>
+            <p class="form-status" id="password-status"></p>
+          </form>
         </div>
       </section>
     </main>

@@ -98,6 +98,7 @@
         <a href="ingredients.html">Ingredients</a>
         <a href="recipes.html">Recipes</a>
         <a href="log.html">Log Intake</a>
+        <a href="settings.html">Settings</a>
         <button class="nav-logout" id="logout-button" type="button">
           Log out
         </button>
@@ -145,19 +146,9 @@
               Add ingredient
             </a>
             <a class="ghost button-link" href="log.html">Log intake</a>
-            <button class="ghost" type="button" id="export-button">
-              Export data
-            </button>
-            <button class="ghost" type="button" id="import-button">
-              Import data
-            </button>
-            <input
-              id="import-file"
-              type="file"
-              accept="application/json"
-              hidden
-            />
-            <span class="action-status" id="import-status"></span>
+            <a class="ghost button-link" href="settings.html">
+              Edit targets
+            </a>
           </div>
         </div>
         <div class="hero-grid">
@@ -210,40 +201,6 @@
               <a class="ghost button-link" href="log.html">Log meal</a>
             </div>
           </div>
-        </div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-header">
-          <div>
-            <h2>Daily targets</h2>
-            <p>Set your daily limits to see progress bars update instantly.</p>
-          </div>
-        </div>
-        <div class="panel-body">
-          <form id="target-form" class="stacked-card">
-            <h3>Targets</h3>
-            <div class="grid two">
-              <label>
-                Calories
-                <input name="calories" type="number" step="0.01" />
-              </label>
-              <label>
-                Protein (g)
-                <input name="protein" type="number" step="0.01" />
-              </label>
-              <label>
-                Carbs (g)
-                <input name="carbs" type="number" step="0.01" />
-              </label>
-              <label>
-                Fat (g)
-                <input name="fat" type="number" step="0.01" />
-              </label>
-            </div>
-            <button class="primary" type="submit">Save targets</button>
-            <p class="form-status" id="target-status"></p>
-          </form>
         </div>
       </section>
 

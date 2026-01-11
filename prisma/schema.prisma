@@ -45,6 +45,43 @@ model Ingredient {
   @@unique([userId, barcode])
 }
 
+model Food {
+  id           Int        @id @default(autoincrement())
+  name         String
+  barcode      String?
+  calories     Float
+  protein      Float
+  carbs        Float
+  fat          Float
+  unit         String
+  servingSize         String?
+  servingsPerContainer String?
+  saturatedFat        Float?
+  transFat            Float?
+  cholesterolMg       Float?
+  sodiumMg            Float?
+  dietaryFiber        Float?
+  totalSugars         Float?
+  addedSugars         Float?
+  vitaminDMcg         Float?
+  calciumMg           Float?
+  ironMg              Float?
+  potassiumMg         Float?
+  ingredientsList     String?
+  vitamins            String?
+  allergens           String?
+  deletedAt    DateTime?
+  userId       Int
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  logEntries   LogEntry[]
+
+  @@index([userId])
+  @@index([userId, deletedAt])
+  @@unique([userId, barcode])
+}
+
 model Recipe {
   id         Int                @id @default(autoincrement())
   name       String
@@ -78,11 +115,13 @@ model LogEntry {
   quantity     Float
   unit         String
   ingredientId Int?
+  foodId       Int?
   recipeId     Int?
   notes        String?
   userId       Int
   createdAt    DateTime   @default(now())
   ingredient   Ingredient? @relation(fields: [ingredientId], references: [id], onDelete: SetNull)
+  food         Food?       @relation(fields: [foodId], references: [id], onDelete: SetNull)
   recipe       Recipe?     @relation(fields: [recipeId], references: [id], onDelete: SetNull)
   user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -90,18 +129,20 @@ model LogEntry {
   @@index([userId])
 }
 
-model DailyTarget {
+model CustomTarget {
   id        Int      @id @default(autoincrement())
-  calories  Float?
-  protein   Float?
-  carbs     Float?
-  fat       Float?
+  key       String
+  label     String
+  unit      String
+  target    Float?
+  allowOver Boolean  @default(false)
   userId    Int
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([userId])
+  @@unique([userId, key])
+  @@index([userId])
 }
 
 model User {
@@ -112,9 +153,10 @@ model User {
   updatedAt    DateTime   @updatedAt
   sessions     Session[]
   ingredients  Ingredient[]
+  foods        Food[]
   recipes      Recipe[]
   logEntries   LogEntry[]
-  targets      DailyTarget[]
+  customTargets CustomTarget[]
 }
 
 model Session {

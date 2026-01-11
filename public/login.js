@@ -37,7 +37,7 @@ if (form) {
     try {
       setStatus("Signing in...");
       await login(payload);
-      window.location.href = "/index.html";
+      window.location.href = "/";
     } catch (error) {
       setStatus(error.message, "error");
     }

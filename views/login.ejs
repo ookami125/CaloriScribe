@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <%- include("partials/head", { title }) %>
+  <body>
+    <div class="ambient"></div>
+
+    <main class="page">
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Welcome back</p>
+            <h1 class="brand-title">
+              <img
+                class="brand-icon"
+                src="/favicons/favicon-32x32.png"
+                alt=""
+                aria-hidden="true"
+              />
+              <span><%= appName %></span>
+            </h1>
+            <p>Sign in to access your dashboard.</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <form id="login-form" class="stacked-card">
+            <label>
+              Username
+              <input
+                name="username"
+                type="text"
+                autocomplete="username"
+                required
+              />
+            </label>
+            <label>
+              Password
+              <input
+                name="password"
+                type="password"
+                autocomplete="current-password"
+                required
+              />
+            </label>
+            <button class="primary" type="submit">Sign in</button>
+            <p class="form-status" id="login-status"></p>
+          </form>
+        </div>
+      </section>
+    </main>
+
+    <script src="/login.js"></script>
+  </body>
+</html>

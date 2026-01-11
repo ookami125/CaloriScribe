@@ -2,9 +2,10 @@ const fs = require("fs");
 const http = require("http");
 const https = require("https");
 const crypto = require("crypto");
+const path = require("path");
 const express = require("express");
 const { PrismaClient } = require("@prisma/client");
-const { verifyPassword } = require("./lib/auth");
+const { hashPassword, verifyPassword } = require("./lib/auth");
 const {
   parseServingLabel,
   convertMass,
@@ -19,6 +20,35 @@ if (!process.env.DATABASE_URL) {
 const prisma = new PrismaClient();
 const app = express();
 const PORT = process.env.PORT || 3000;
+const APP_NAME = "CaloriScribe";
+const CORE_TARGET_CATALOG = {
+  calories: { label: "Calories", unit: "cal" },
+  protein: { label: "Protein", unit: "g" },
+  carbs: { label: "Carbs", unit: "g" },
+  fat: { label: "Fat", unit: "g" },
+};
+const CUSTOM_TARGET_CATALOG = {
+  saturatedFat: { label: "Saturated fat", unit: "g" },
+  transFat: { label: "Trans fat", unit: "g" },
+  cholesterolMg: { label: "Cholesterol", unit: "mg" },
+  sodiumMg: { label: "Sodium", unit: "mg" },
+  dietaryFiber: { label: "Dietary fiber", unit: "g" },
+  totalSugars: { label: "Total sugars", unit: "g" },
+  addedSugars: { label: "Added sugars", unit: "g" },
+  vitaminDMcg: { label: "Vitamin D", unit: "mcg" },
+  calciumMg: { label: "Calcium", unit: "mg" },
+  ironMg: { label: "Iron", unit: "mg" },
+  potassiumMg: { label: "Potassium", unit: "mg" },
+};
+const TARGET_CATALOG = {
+  ...CORE_TARGET_CATALOG,
+  ...CUSTOM_TARGET_CATALOG,
+};
+const CORE_TARGET_KEYS = Object.keys(CORE_TARGET_CATALOG);
+const CUSTOM_TARGET_KEYS = Object.keys(CUSTOM_TARGET_CATALOG);
+
+app.set("view engine", "ejs");
+app.set("views", path.join(__dirname, "views"));
 
 app.use(express.json({ limit: "10mb" }));
 app.set("trust proxy", 1);
@@ -52,6 +82,21 @@ const requireAuth = (req, res, next) => {
   return next();
 };
 
+const requirePageAuth = (req, res, next) => {
+  if (!req.user) {
+    return res.redirect("/login");
+  }
+  return next();
+};
+
+const renderPage = (res, view, { title, active } = {}) => {
+  res.render(view, {
+    title: title || APP_NAME,
+    active: active || "",
+    appName: APP_NAME,
+  });
+};
+
 app.use(attachUser);
 
 const parseNumber = (value, fallback = 0) => {
@@ -70,6 +115,23 @@ const parseOptionalNumber = (value) => {
 const parseOptionalString = (value) => {
   const trimmed = String(value ?? "").trim();
   return trimmed ? trimmed : null;
+};
+
+const parseBoolean = (value, fallback = false) => {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (["true", "1", "yes", "y", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["false", "0", "no", "n", "off"].includes(normalized)) {
+    return false;
+  }
+  return fallback;
 };
 
 const normalizeNameKey = (value) =>
@@ -96,6 +158,48 @@ const findInvalidNumberField = (payload, fields) => {
 const parsePositiveInt = (value, fallback = null) => {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+};
+
+const isCoreTargetKey = (key) => CORE_TARGET_KEYS.includes(key);
+
+const ensureCoreTargets = async (userId, tx = prisma) => {
+  const existingCount = await tx.customTarget.count({ where: { userId } });
+  if (existingCount) {
+    return;
+  }
+  await tx.customTarget.createMany({
+    data: CORE_TARGET_KEYS.map((key) => ({
+      key,
+      label: CORE_TARGET_CATALOG[key].label,
+      unit: CORE_TARGET_CATALOG[key].unit,
+      target: null,
+      allowOver: false,
+      userId,
+    })),
+  });
+};
+
+const getCustomTargetsForUser = async (userId, tx = prisma) => {
+  await ensureCoreTargets(userId, tx);
+  return tx.customTarget.findMany({
+    where: { userId },
+    orderBy: { label: "asc" },
+  });
+};
+
+const buildTargetsPayload = (targets) => {
+  const map = new Map((targets || []).map((target) => [target.key, target]));
+  const read = (key) => map.get(key) || {};
+  return {
+    calories: read("calories").target ?? null,
+    protein: read("protein").target ?? null,
+    carbs: read("carbs").target ?? null,
+    fat: read("fat").target ?? null,
+    caloriesAllowOver: Boolean(read("calories").allowOver),
+    proteinAllowOver: Boolean(read("protein").allowOver),
+    carbsAllowOver: Boolean(read("carbs").allowOver),
+    fatAllowOver: Boolean(read("fat").allowOver),
+  };
 };
 
 const buildIngredientPayload = (ingredient, userId) => {
@@ -131,6 +235,8 @@ const buildIngredientPayload = (ingredient, userId) => {
     userId,
   };
 };
+
+const buildFoodPayload = (food, userId) => buildIngredientPayload(food, userId);
 
 const TARGET_LANGUAGE = (process.env.TARGET_LANGUAGE || "en").toLowerCase();
 const REQUEST_TIMEOUT_MS = Number.parseInt(
@@ -679,43 +785,48 @@ const normalizeRecipeQuantity = (quantity, unit) => {
   return { quantity: quantity * multiplier, unit: "serving" };
 };
 
+const BASE_NUTRIENT_KEYS = ["calories", "protein", "carbs", "fat"];
+const ALL_NUTRIENT_KEYS = [...BASE_NUTRIENT_KEYS, ...CUSTOM_TARGET_KEYS];
+
+const createNutritionTotals = () => {
+  const totals = {};
+  ALL_NUTRIENT_KEYS.forEach((key) => {
+    totals[key] = 0;
+  });
+  return totals;
+};
+
+const addNutritionTotals = (totals, source, multiplier) => {
+  ALL_NUTRIENT_KEYS.forEach((key) => {
+    totals[key] += parseNumber(source?.[key], 0) * multiplier;
+  });
+};
+
 const computeIngredientTotals = (ingredient, quantity, unit) => {
   const normalized = normalizeIngredientQuantity(ingredient, quantity, unit);
   const normalizedQuantity = normalized.error ? quantity : normalized.quantity;
-  return {
-    calories: ingredient.calories * normalizedQuantity,
-    protein: ingredient.protein * normalizedQuantity,
-    carbs: ingredient.carbs * normalizedQuantity,
-    fat: ingredient.fat * normalizedQuantity,
-  };
+  const totals = createNutritionTotals();
+  addNutritionTotals(totals, ingredient, normalizedQuantity);
+  return totals;
 };
 
 const computeRecipeTotals = (recipe) => {
-  const totals = recipe.items.reduce(
-    (acc, item) => {
-      const normalized = normalizeIngredientQuantity(
-        item.ingredient,
-        item.quantity,
-        item.unit
-      );
-      const normalizedQuantity = normalized.error
-        ? item.quantity
-        : normalized.quantity;
-      acc.calories += item.ingredient.calories * normalizedQuantity;
-      acc.protein += item.ingredient.protein * normalizedQuantity;
-      acc.carbs += item.ingredient.carbs * normalizedQuantity;
-      acc.fat += item.ingredient.fat * normalizedQuantity;
-      return acc;
-    },
-    { calories: 0, protein: 0, carbs: 0, fat: 0 }
-  );
+  const totals = createNutritionTotals();
+  recipe.items.forEach((item) => {
+    const itemTotals = computeIngredientTotals(
+      item.ingredient,
+      item.quantity,
+      item.unit
+    );
+    ALL_NUTRIENT_KEYS.forEach((key) => {
+      totals[key] += itemTotals[key];
+    });
+  });
   const servings = recipe.servings > 0 ? recipe.servings : 1;
-  const perServing = {
-    calories: totals.calories / servings,
-    protein: totals.protein / servings,
-    carbs: totals.carbs / servings,
-    fat: totals.fat / servings,
-  };
+  const perServing = {};
+  ALL_NUTRIENT_KEYS.forEach((key) => {
+    perServing[key] = totals[key] / servings;
+  });
 
   return { totals, perServing };
 };
@@ -743,18 +854,27 @@ const formatLogEntry = (entry) => {
     entryUnit = entry.unit || entry.ingredient.unit;
   }
 
+  if (entry.food) {
+    nutrition = computeIngredientTotals(
+      entry.food,
+      entry.quantity,
+      entry.unit || entry.food.unit
+    );
+    label = entry.food.name;
+    entryUnit = entry.unit || entry.food.unit;
+  }
+
   if (entry.recipe) {
     const recipeNutrition = computeRecipeTotals(entry.recipe);
     const normalized = normalizeRecipeQuantity(entry.quantity, entry.unit);
     const servingQuantity = normalized.error
       ? entry.quantity
       : normalized.quantity;
-    nutrition = {
-      calories: recipeNutrition.perServing.calories * servingQuantity,
-      protein: recipeNutrition.perServing.protein * servingQuantity,
-      carbs: recipeNutrition.perServing.carbs * servingQuantity,
-      fat: recipeNutrition.perServing.fat * servingQuantity,
-    };
+    nutrition = {};
+    ALL_NUTRIENT_KEYS.forEach((key) => {
+      nutrition[key] =
+        parseNumber(recipeNutrition.perServing?.[key], 0) * servingQuantity;
+    });
     label = entry.recipe.name;
     entryUnit = entry.unit || "serving";
   }
@@ -830,53 +950,101 @@ app.get(
   })
 );
 
+app.post(
+  "/api/change-password",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const oldPassword = String(req.body.oldPassword || "");
+    const newPassword = String(req.body.newPassword || "");
+    const confirmPassword = String(req.body.confirmPassword || "");
+
+    if (!oldPassword || !newPassword || !confirmPassword) {
+      return res.status(400).json({ error: "All fields are required." });
+    }
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ error: "New passwords do not match." });
+    }
+    if (newPassword.length < 8) {
+      return res
+        .status(400)
+        .json({ error: "New password must be at least 8 characters." });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+    });
+    if (!user) {
+      return res.status(404).json({ error: "User not found." });
+    }
+    const isValid = await verifyPassword(oldPassword, user.passwordHash);
+    if (!isValid) {
+      return res.status(400).json({ error: "Old password is incorrect." });
+    }
+
+    const passwordHash = await hashPassword(newPassword);
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data: { passwordHash },
+    });
+
+    res.json({ status: "ok" });
+  })
+);
+
 app.get(
   "/api/export",
   requireAuth,
   asyncHandler(async (req, res) => {
     const userId = req.user.id;
-    const [ingredients, recipes, logs, targets] = await Promise.all([
-      prisma.ingredient.findMany({
-        where: { userId },
-        orderBy: { name: "asc" },
-      }),
-      prisma.recipe.findMany({
-        where: { userId },
-        orderBy: { name: "asc" },
-        include: {
-          items: {
-            include: { ingredient: true },
+    const [ingredients, foods, recipes, logs, customTargets] =
+      await Promise.all([
+        prisma.ingredient.findMany({
+          where: { userId },
+          orderBy: { name: "asc" },
+        }),
+        prisma.food.findMany({
+          where: { userId },
+          orderBy: { name: "asc" },
+        }),
+        prisma.recipe.findMany({
+          where: { userId },
+          orderBy: { name: "asc" },
+          include: {
+            items: {
+              include: { ingredient: true },
+            },
           },
-        },
-      }),
-      prisma.logEntry.findMany({
-        where: { userId },
-        orderBy: { consumedAt: "desc" },
-        include: {
-          ingredient: true,
-          recipe: {
-            include: {
-              items: {
-                include: { ingredient: true },
+        }),
+        prisma.logEntry.findMany({
+          where: { userId },
+          orderBy: { consumedAt: "desc" },
+          include: {
+            ingredient: true,
+            food: true,
+            recipe: {
+              include: {
+                items: {
+                  include: { ingredient: true },
+                },
               },
             },
           },
-        },
-      }),
-      prisma.dailyTarget.findUnique({
-        where: { userId },
-      }),
-    ]);
+        }),
+        getCustomTargetsForUser(userId),
+      ]);
 
+    const targets = buildTargetsPayload(customTargets);
     res.json({
       exportedAt: new Date().toISOString(),
-      version: 1,
+      version: 2,
       user: {
         username: req.user.username,
         createdAt: req.user.createdAt,
       },
       targets,
+      customTargets,
       ingredients,
+      foods,
       recipes,
       logs,
     });
@@ -902,15 +1070,47 @@ app.post(
     const ingredients = Array.isArray(payload.ingredients)
       ? payload.ingredients
       : [];
+    const foods = Array.isArray(payload.foods) ? payload.foods : [];
     const recipes = Array.isArray(payload.recipes) ? payload.recipes : [];
     const logs = Array.isArray(payload.logs) ? payload.logs : [];
-    const targets = payload.targets || null;
+    const legacyTargets = payload.targets || null;
+    const customTargets = Array.isArray(payload.customTargets)
+      ? payload.customTargets
+      : [];
+
+    const incomingTargets = new Map();
+    customTargets.forEach((target) => {
+      const key = String(target?.key || "").trim();
+      if (!key || !TARGET_CATALOG[key]) {
+        return;
+      }
+      if (!incomingTargets.has(key)) {
+        incomingTargets.set(key, target);
+      }
+    });
+    if (legacyTargets) {
+      CORE_TARGET_KEYS.forEach((key) => {
+        if (incomingTargets.has(key)) {
+          return;
+        }
+        incomingTargets.set(key, {
+          key,
+          target: legacyTargets?.[key],
+          allowOver: legacyTargets?.[`${key}AllowOver`],
+        });
+      });
+    }
+    const hasCoreTargets = CORE_TARGET_KEYS.some((key) =>
+      incomingTargets.has(key)
+    );
 
     const summary = {
       ingredients: { created: 0, reused: 0, skipped: 0 },
+      foods: { created: 0, reused: 0, skipped: 0 },
       recipes: { created: 0, skipped: 0 },
       logs: { created: 0, skipped: 0 },
-      targets: targets ? "updated" : "skipped",
+      targets: hasCoreTargets ? "updated" : "skipped",
+      customTargets: { created: 0, updated: 0, skipped: 0 },
     };
 
     await prisma.$transaction(async (tx) => {
@@ -921,7 +1121,8 @@ app.post(
         });
         await tx.recipe.deleteMany({ where: { userId: req.user.id } });
         await tx.ingredient.deleteMany({ where: { userId: req.user.id } });
-        await tx.dailyTarget.deleteMany({ where: { userId: req.user.id } });
+        await tx.food.deleteMany({ where: { userId: req.user.id } });
+        await tx.customTarget.deleteMany({ where: { userId: req.user.id } });
       }
 
       const existingIngredients = await tx.ingredient.findMany({
@@ -977,6 +1178,63 @@ app.post(
         const createdNameKey = normalizeNameKey(created.name);
         if (createdNameKey) {
           createdByName.set(createdNameKey, created);
+        }
+      }
+
+      const existingFoods = await tx.food.findMany({
+        where: { userId: req.user.id, deletedAt: null },
+        select: { id: true, barcode: true, name: true, unit: true },
+      });
+      const foodById = new Map(existingFoods.map((item) => [item.id, item]));
+      const existingFoodByBarcode = new Map();
+      const existingFoodByName = new Map();
+      existingFoods.forEach((item) => {
+        if (item.barcode) {
+          existingFoodByBarcode.set(item.barcode, item);
+        }
+        const nameKey = normalizeNameKey(item.name);
+        if (nameKey) {
+          existingFoodByName.set(nameKey, item);
+        }
+      });
+
+      const createdFoodByBarcode = new Map();
+      const createdFoodByName = new Map();
+      const foodIdMap = new Map();
+
+      for (const food of foods) {
+        const originalId = food?.id;
+        const barcode = parseOptionalString(food?.barcode);
+        const nameKey = normalizeNameKey(food?.name);
+        let matched =
+          (barcode &&
+            (existingFoodByBarcode.get(barcode) ||
+              createdFoodByBarcode.get(barcode))) ||
+          (nameKey &&
+            (existingFoodByName.get(nameKey) || createdFoodByName.get(nameKey)));
+
+        if (matched) {
+          foodIdMap.set(originalId, matched.id);
+          summary.foods.reused += 1;
+          continue;
+        }
+
+        const data = buildFoodPayload(food, req.user.id);
+        if (!data) {
+          summary.foods.skipped += 1;
+          continue;
+        }
+
+        const created = await tx.food.create({ data });
+        foodIdMap.set(originalId, created.id);
+        foodById.set(created.id, created);
+        summary.foods.created += 1;
+        if (created.barcode) {
+          createdFoodByBarcode.set(created.barcode, created);
+        }
+        const createdNameKey = normalizeNameKey(created.name);
+        if (createdNameKey) {
+          createdFoodByName.set(createdNameKey, created);
         }
       }
 
@@ -1041,10 +1299,16 @@ app.post(
         const mappedIngredientId = entry?.ingredientId
           ? ingredientIdMap.get(entry.ingredientId)
           : null;
+        const mappedFoodId = entry?.foodId
+          ? foodIdMap.get(entry.foodId)
+          : null;
         const mappedRecipeId = entry?.recipeId
           ? recipeIdMap.get(entry.recipeId)
           : null;
-        if ((mappedIngredientId && mappedRecipeId) || (!mappedIngredientId && !mappedRecipeId)) {
+        const resolvedTargets = [mappedIngredientId, mappedFoodId, mappedRecipeId].filter(
+          (id) => Boolean(id)
+        );
+        if (resolvedTargets.length !== 1) {
           summary.logs.skipped += 1;
           continue;
         }
@@ -1068,6 +1332,18 @@ app.post(
           }
         }
 
+        if (mappedFoodId) {
+          const food = foodById.get(mappedFoodId);
+          if (!unit) {
+            unit = food?.unit || "";
+          }
+          const normalized = normalizeIngredientQuantity(food, quantity, unit);
+          if (normalized.error) {
+            summary.logs.skipped += 1;
+            continue;
+          }
+        }
+
         if (mappedRecipeId) {
           if (!unit) {
             unit = "serving";
@@ -1082,6 +1358,7 @@ app.post(
         await tx.logEntry.create({
           data: {
             ingredientId: mappedIngredientId,
+            foodId: mappedFoodId,
             recipeId: mappedRecipeId,
             quantity,
             unit,
@@ -1093,19 +1370,60 @@ app.post(
         summary.logs.created += 1;
       }
 
-      if (targets) {
-        const data = {
-          calories: parseOptionalNumber(targets?.calories),
-          protein: parseOptionalNumber(targets?.protein),
-          carbs: parseOptionalNumber(targets?.carbs),
-          fat: parseOptionalNumber(targets?.fat),
-        };
-        await tx.dailyTarget.upsert({
-          where: { userId: req.user.id },
-          update: data,
-          create: { ...data, userId: req.user.id },
-        });
+      if (incomingTargets.size) {
+        for (const target of incomingTargets.values()) {
+          const key = String(target?.key || "").trim();
+          const catalog = TARGET_CATALOG[key];
+          if (!catalog) {
+            summary.customTargets.skipped += 1;
+            continue;
+          }
+          const isCore = isCoreTargetKey(key);
+          const targetValue = parseOptionalNumber(target?.target);
+          if (targetValue === null) {
+            if (!isCore) {
+              summary.customTargets.skipped += 1;
+              continue;
+            }
+          } else if (targetValue < 0 || (!isCore && targetValue <= 0)) {
+            summary.customTargets.skipped += 1;
+            continue;
+          }
+          const label =
+            String(target?.label || catalog.label).trim() || catalog.label;
+          const allowOver = parseBoolean(target?.allowOver);
+
+          const existing = await tx.customTarget.findFirst({
+            where: { userId: req.user.id, key },
+          });
+          if (existing) {
+            await tx.customTarget.update({
+              where: { id: existing.id },
+              data: {
+                label,
+                unit: catalog.unit,
+                target: targetValue,
+                allowOver,
+              },
+            });
+            summary.customTargets.updated += 1;
+          } else {
+            await tx.customTarget.create({
+              data: {
+                key,
+                label,
+                unit: catalog.unit,
+                target: targetValue,
+                allowOver,
+                userId: req.user.id,
+              },
+            });
+            summary.customTargets.created += 1;
+          }
+        }
       }
+
+      await ensureCoreTargets(req.user.id, tx);
     });
 
     res.json(summary);
@@ -1113,28 +1431,6 @@ app.post(
 );
 
 app.use("/api", requireAuth);
-
-app.get("/login", (req, res) => res.redirect("/login.html"));
-
-app.use((req, res, next) => {
-  const isHtmlRequest = req.path === "/" || req.path.endsWith(".html");
-  if (!isHtmlRequest) {
-    return next();
-  }
-  const isLoginPage = req.path === "/login.html" || req.path === "/login";
-  if (req.user) {
-    if (isLoginPage) {
-      return res.redirect("/index.html");
-    }
-    return next();
-  }
-  if (isLoginPage) {
-    return next();
-  }
-  return res.redirect("/login.html");
-});
-
-app.use(express.static("public"));
 
 const buildRecipeItems = async (items, userId) => {
   const ingredientIds = items
@@ -1206,6 +1502,7 @@ app.get(
     const provider = String(req.query.provider || "auto")
       .trim()
       .toLowerCase();
+    const type = String(req.query.type || "ingredient").trim().toLowerCase();
 
     if (!barcode) {
       return res.status(400).json({ error: "Barcode is required." });
@@ -1215,18 +1512,36 @@ app.get(
     if (!allowedProviders.includes(provider)) {
       return res.status(400).json({ error: "Unknown provider." });
     }
+    if (!["ingredient", "food"].includes(type)) {
+      return res.status(400).json({ error: "Unknown lookup type." });
+    }
+    const isFood = type === "food";
 
-    const existing = await prisma.ingredient.findFirst({
-      where: { barcode, userId: req.user.id, deletedAt: null },
-    });
+    const existing = await (isFood ? prisma.food : prisma.ingredient).findFirst(
+      {
+        where: { barcode, userId: req.user.id, deletedAt: null },
+      }
+    );
     if (existing) {
-      return res.json({ source: "local", ingredient: existing });
+      return res.json({
+        source: "local",
+        [isFood ? "food" : "ingredient"]: existing,
+      });
     }
 
     const cacheKey = getBarcodeCacheKey(barcode, provider);
     const cached = readBarcodeCache(cacheKey);
+    const mapResult = (result) => {
+      if (!result) {
+        return null;
+      }
+      if (!isFood) {
+        return result;
+      }
+      return { source: result.source, food: result.ingredient };
+    };
     if (cached) {
-      return res.json(cached);
+      return res.json(mapResult(cached));
     }
 
     const availableProviders = {
@@ -1266,21 +1581,21 @@ app.get(
           const result = await lookupNutritionix(barcode);
           if (result) {
             cacheResult(result);
-            return res.json(result);
+            return res.json(mapResult(result));
           }
         }
         if (nextProvider === "usda") {
           const result = await lookupUsda(barcode);
           if (result) {
             cacheResult(result);
-            return res.json(result);
+            return res.json(mapResult(result));
           }
         }
         if (nextProvider === "openfoodfacts") {
           const result = await lookupOpenFoodFacts(barcode);
           if (result) {
             cacheResult(result);
-            return res.json(result);
+            return res.json(mapResult(result));
           }
         }
       } catch (error) {
@@ -1453,6 +1768,127 @@ app.delete(
 );
 
 app.get(
+  "/api/foods",
+  asyncHandler(async (req, res) => {
+    const { barcode, search } = req.query;
+    const where = { userId: req.user.id, deletedAt: null };
+    if (barcode) {
+      where.barcode = String(barcode);
+    }
+    if (search) {
+      where.name = { contains: String(search), mode: "insensitive" };
+    }
+    const foods = await prisma.food.findMany({
+      where,
+      orderBy: { name: "asc" },
+    });
+    res.json(foods);
+  })
+);
+
+app.post(
+  "/api/foods",
+  asyncHandler(async (req, res) => {
+    const invalidField = findInvalidNumberField(req.body, [
+      "calories",
+      "protein",
+      "carbs",
+      "fat",
+      "saturatedFat",
+      "transFat",
+      "cholesterolMg",
+      "sodiumMg",
+      "dietaryFiber",
+      "totalSugars",
+      "addedSugars",
+      "vitaminDMcg",
+      "calciumMg",
+      "ironMg",
+      "potassiumMg",
+    ]);
+    if (invalidField) {
+      return res
+        .status(400)
+        .json({ error: `${invalidField} must be a number.` });
+    }
+    const data = buildFoodPayload(req.body, req.user.id);
+    if (!data) {
+      return res.status(400).json({ error: "Food name and unit are required." });
+    }
+
+    const food = await prisma.food.create({ data });
+    res.status(201).json(food);
+  })
+);
+
+app.put(
+  "/api/foods/:id",
+  asyncHandler(async (req, res) => {
+    const foodId = Number(req.params.id);
+    if (!Number.isFinite(foodId)) {
+      return res.status(400).json({ error: "Invalid food id." });
+    }
+    const invalidField = findInvalidNumberField(req.body, [
+      "calories",
+      "protein",
+      "carbs",
+      "fat",
+      "saturatedFat",
+      "transFat",
+      "cholesterolMg",
+      "sodiumMg",
+      "dietaryFiber",
+      "totalSugars",
+      "addedSugars",
+      "vitaminDMcg",
+      "calciumMg",
+      "ironMg",
+      "potassiumMg",
+    ]);
+    if (invalidField) {
+      return res
+        .status(400)
+        .json({ error: `${invalidField} must be a number.` });
+    }
+    const existing = await prisma.food.findFirst({
+      where: { id: foodId, userId: req.user.id, deletedAt: null },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: "Food not found." });
+    }
+    const data = buildFoodPayload(req.body, req.user.id);
+    if (!data) {
+      return res.status(400).json({ error: "Food name and unit are required." });
+    }
+    delete data.userId;
+
+    const food = await prisma.food.update({
+      where: { id: foodId },
+      data,
+    });
+    res.json(food);
+  })
+);
+
+app.delete(
+  "/api/foods/:id",
+  asyncHandler(async (req, res) => {
+    const foodId = Number(req.params.id);
+    if (!Number.isFinite(foodId)) {
+      return res.status(400).json({ error: "Invalid food id." });
+    }
+    const result = await prisma.food.updateMany({
+      where: { id: foodId, userId: req.user.id, deletedAt: null },
+      data: { deletedAt: new Date(), barcode: null },
+    });
+    if (!result.count) {
+      return res.status(404).json({ error: "Food not found." });
+    }
+    res.status(204).end();
+  })
+);
+
+app.get(
   "/api/recipes",
   asyncHandler(async (req, res) => {
     const recipes = await prisma.recipe.findMany({
@@ -1618,6 +2054,7 @@ app.get(
       ...(offset !== null ? { skip: offset } : {}),
       include: {
         ingredient: true,
+        food: true,
         recipe: {
           include: {
             items: {
@@ -1631,58 +2068,121 @@ app.get(
   })
 );
 
-const getOrCreateTargets = async (userId) => {
-  const existing = await prisma.dailyTarget.findUnique({
-    where: { userId },
-  });
-  if (existing) {
-    return existing;
-  }
-  return prisma.dailyTarget.create({
-    data: {
-      calories: null,
-      protein: null,
-      carbs: null,
-      fat: null,
-      userId,
-    },
-  });
-};
-
 app.get(
-  "/api/targets",
+  "/api/custom-targets",
   asyncHandler(async (req, res) => {
-    const targets = await getOrCreateTargets(req.user.id);
+    const targets = await getCustomTargetsForUser(req.user.id);
     res.json(targets);
   })
 );
 
-app.put(
-  "/api/targets",
+app.post(
+  "/api/custom-targets",
   asyncHandler(async (req, res) => {
-    const existing = await getOrCreateTargets(req.user.id);
-    const invalidField = findInvalidNumberField(req.body, [
-      "calories",
-      "protein",
-      "carbs",
-      "fat",
-    ]);
-    if (invalidField) {
-      return res
-        .status(400)
-        .json({ error: `${invalidField} must be a number.` });
+    const key = String(req.body.key || "").trim();
+    const catalog = TARGET_CATALOG[key];
+    if (!catalog) {
+      return res.status(400).json({ error: "Unsupported target type." });
     }
-    const data = {
-      calories: parseOptionalNumber(req.body.calories),
-      protein: parseOptionalNumber(req.body.protein),
-      carbs: parseOptionalNumber(req.body.carbs),
-      fat: parseOptionalNumber(req.body.fat),
-    };
-    const targets = await prisma.dailyTarget.update({
+    const isCore = isCoreTargetKey(key);
+    const target = parseOptionalNumber(req.body.target);
+    if (target === null) {
+      if (!isCore) {
+        return res
+          .status(400)
+          .json({ error: "Target must be greater than 0." });
+      }
+    } else if (target < 0 || (!isCore && target <= 0)) {
+      return res.status(400).json({ error: "Target must be greater than 0." });
+    }
+    const label = String(req.body.label || catalog.label).trim() || catalog.label;
+    const allowOver = parseBoolean(req.body.allowOver);
+
+    const created = await prisma.customTarget.create({
+      data: {
+        key,
+        label,
+        unit: catalog.unit,
+        target,
+        allowOver,
+        userId: req.user.id,
+      },
+    });
+
+    res.status(201).json(created);
+  })
+);
+
+app.put(
+  "/api/custom-targets/:id",
+  asyncHandler(async (req, res) => {
+    const targetId = Number(req.params.id);
+    if (!Number.isFinite(targetId)) {
+      return res.status(400).json({ error: "Invalid target id." });
+    }
+
+    const existing = await prisma.customTarget.findFirst({
+      where: { id: targetId, userId: req.user.id },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: "Target not found." });
+    }
+    const isCore = isCoreTargetKey(existing.key);
+
+    const data = {};
+    if (req.body.label !== undefined) {
+      const label = String(req.body.label || "").trim();
+      if (!label) {
+        return res.status(400).json({ error: "Label is required." });
+      }
+      data.label = label;
+    }
+    if (req.body.target !== undefined) {
+      const target = parseOptionalNumber(req.body.target);
+      if (target === null) {
+        if (!isCore) {
+          return res
+            .status(400)
+            .json({ error: "Target must be greater than 0." });
+        }
+      } else if (target < 0 || (!isCore && target <= 0)) {
+        return res.status(400).json({ error: "Target must be greater than 0." });
+      }
+      data.target = target;
+    }
+    if (req.body.allowOver !== undefined) {
+      data.allowOver = parseBoolean(req.body.allowOver);
+    }
+
+    if (!Object.keys(data).length) {
+      return res.status(400).json({ error: "No updates provided." });
+    }
+
+    const updated = await prisma.customTarget.update({
       where: { id: existing.id },
       data,
     });
-    res.json(targets);
+    res.json(updated);
+  })
+);
+
+app.delete(
+  "/api/custom-targets/:id",
+  asyncHandler(async (req, res) => {
+    const targetId = Number(req.params.id);
+    if (!Number.isFinite(targetId)) {
+      return res.status(400).json({ error: "Invalid target id." });
+    }
+    const existing = await prisma.customTarget.findFirst({
+      where: { id: targetId, userId: req.user.id },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: "Target not found." });
+    }
+    await prisma.customTarget.delete({
+      where: { id: existing.id },
+    });
+    res.status(204).end();
   })
 );
 
@@ -1692,6 +2192,7 @@ app.post(
     const ingredientId = req.body.ingredientId
       ? Number(req.body.ingredientId)
       : null;
+    const foodId = req.body.foodId ? Number(req.body.foodId) : null;
     const recipeId = req.body.recipeId ? Number(req.body.recipeId) : null;
     const invalidField = findInvalidNumberField(req.body, ["quantity"]);
     if (invalidField) {
@@ -1700,10 +2201,13 @@ app.post(
         .json({ error: `${invalidField} must be a number.` });
     }
 
-    if ((ingredientId && recipeId) || (!ingredientId && !recipeId)) {
+    const selectedTargets = [ingredientId, foodId, recipeId].filter((id) =>
+      Number.isFinite(id)
+    );
+    if (selectedTargets.length !== 1) {
       return res
         .status(400)
-        .json({ error: "Select either an ingredient or a recipe." });
+        .json({ error: "Select a food, ingredient, or recipe." });
     }
 
     const quantity = parseNumber(req.body.quantity, 1);
@@ -1728,6 +2232,22 @@ app.post(
       }
     }
 
+    if (foodId) {
+      const food = await prisma.food.findFirst({
+        where: { id: foodId, userId: req.user.id, deletedAt: null },
+      });
+      if (!food) {
+        return res.status(404).json({ error: "Food not found." });
+      }
+      if (!unit) {
+        unit = food.unit;
+      }
+      const normalized = normalizeIngredientQuantity(food, quantity, unit);
+      if (normalized.error) {
+        return res.status(400).json({ error: normalized.error });
+      }
+    }
+
     if (recipeId) {
       const recipe = await prisma.recipe.findFirst({
         where: { id: recipeId, userId: req.user.id, deletedAt: null },
@@ -1747,6 +2267,7 @@ app.post(
     const entry = await prisma.logEntry.create({
       data: {
         ingredientId,
+        foodId,
         recipeId,
         quantity,
         unit,
@@ -1756,6 +2277,7 @@ app.post(
       },
       include: {
         ingredient: true,
+        food: true,
         recipe: {
           include: {
             items: { include: { ingredient: true } },
@@ -1784,6 +2306,89 @@ app.delete(
     res.status(204).end();
   })
 );
+
+app.get("/login", (req, res) => {
+  if (req.user) {
+    return res.redirect("/");
+  }
+  return renderPage(res, "login", { title: `${APP_NAME} Login` });
+});
+
+app.get(
+  "/",
+  requirePageAuth,
+  asyncHandler(async (req, res) => {
+    renderPage(res, "index", {
+      title: `${APP_NAME} Dashboard`,
+      active: "dashboard",
+    });
+  })
+);
+
+app.get(
+  "/ingredients",
+  requirePageAuth,
+  asyncHandler(async (req, res) => {
+    renderPage(res, "ingredients", {
+      title: `${APP_NAME} Ingredients`,
+      active: "ingredients",
+    });
+  })
+);
+
+app.get(
+  "/foods",
+  requirePageAuth,
+  asyncHandler(async (req, res) => {
+    renderPage(res, "foods", {
+      title: `${APP_NAME} Foods`,
+      active: "foods",
+    });
+  })
+);
+
+app.get(
+  "/recipes",
+  requirePageAuth,
+  asyncHandler(async (req, res) => {
+    renderPage(res, "recipes", {
+      title: `${APP_NAME} Recipes`,
+      active: "recipes",
+    });
+  })
+);
+
+app.get(
+  "/log",
+  requirePageAuth,
+  asyncHandler(async (req, res) => {
+    renderPage(res, "log", {
+      title: `${APP_NAME} Log Intake`,
+      active: "log",
+    });
+  })
+);
+
+app.get(
+  "/settings",
+  requirePageAuth,
+  asyncHandler(async (req, res) => {
+    renderPage(res, "settings", {
+      title: `${APP_NAME} Settings`,
+      active: "settings",
+    });
+  })
+);
+
+app.get("/index.html", (req, res) => res.redirect("/"));
+app.get("/ingredients.html", (req, res) => res.redirect("/ingredients"));
+app.get("/foods.html", (req, res) => res.redirect("/foods"));
+app.get("/recipes.html", (req, res) => res.redirect("/recipes"));
+app.get("/log.html", (req, res) => res.redirect("/log"));
+app.get("/settings.html", (req, res) => res.redirect("/settings"));
+app.get("/login.html", (req, res) => res.redirect("/login"));
+
+app.use(express.static("public", { index: false }));
 
 app.use((error, req, res, next) => {
   if (error.code === "P2002") {

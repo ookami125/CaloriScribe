@@ -60,7 +60,7 @@ This app uses Prisma, so you can swap SQLite for PostgreSQL, MySQL, or other sup
 - If the browser does not support `BarcodeDetector`, use the barcode input field manually.
 
 ## Login (invite-only)
-Create users manually and sign in at `/login.html`.
+Create users manually and sign in at `/login`.
 
 ```bash
 npm run create:user -- username password

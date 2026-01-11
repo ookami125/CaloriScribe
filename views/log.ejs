@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+  <%- include("partials/head", { title }) %>
+  <body>
+    <div class="ambient"></div>
+    <%- include("partials/header", { active, appName }) %>
+
+    <main class="page">
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Daily overview</h2>
+            <p>Macros and calories for your selected day.</p>
+          </div>
+        </div>
+        <div class="hero-grid">
+          <%- include("partials/calories-panel") %>
+          <%- include("partials/macro-split-panel") %>
+          <div class="stat-card" id="log-impact-card">
+            <span class="eyebrow">Next log impact</span>
+            <h2 id="log-impact-calories">+0 cal</h2>
+            <div class="macro-grid">
+              <div class="macro-item">
+                <span class="macro-label">Protein</span>
+                <h3 id="log-impact-protein">+0g</h3>
+              </div>
+              <div class="macro-item">
+                <span class="macro-label">Carbs</span>
+                <h3 id="log-impact-carbs">+0g</h3>
+              </div>
+              <div class="macro-item">
+                <span class="macro-label">Fat</span>
+                <h3 id="log-impact-fat">+0g</h3>
+              </div>
+            </div>
+            <p class="meta" id="log-impact-note">
+              Select an item to preview.
+            </p>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h1>Log intake</h1>
+            <p>Record meals or single products with full nutrition info.</p>
+          </div>
+        </div>
+        <div class="panel-body split">
+          <form id="log-form" class="stacked-card">
+            <h3>Add log entry</h3>
+            <div class="toggle" role="radiogroup" aria-label="Log type">
+              <label>
+                <input type="radio" name="entryType" value="food" checked />
+                Food
+              </label>
+              <label>
+                <input type="radio" name="entryType" value="recipe" />
+                Recipe
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="entryType"
+                  value="ingredient"
+                />
+                Ingredient
+              </label>
+            </div>
+            <label>
+              Item
+              <select name="itemId" id="log-item"></select>
+            </label>
+            <div class="grid two">
+              <label>
+                Quantity
+                <input name="quantity" type="number" step="0.01" value="1" />
+              </label>
+              <label>
+                Unit
+                <input name="unit" type="text" placeholder="auto" />
+              </label>
+            </div>
+            <label>
+              Notes
+              <textarea name="notes" rows="2"></textarea>
+            </label>
+            <button class="primary" type="submit">Log intake</button>
+            <p class="form-status" id="log-status"></p>
+          </form>
+          <div>
+            <div class="panel-tools">
+              <div class="date-controls">
+                <button
+                  class="ghost day-nav"
+                  type="button"
+                  data-day-action="prev"
+                  aria-label="Previous day"
+                >
+                  Prev
+                </button>
+                <label class="date-picker">
+                  Day
+                  <input type="date" id="log-date-filter" data-day-input />
+                </label>
+                <button
+                  class="ghost day-nav"
+                  type="button"
+                  data-day-action="next"
+                  aria-label="Next day"
+                >
+                  Next
+                </button>
+                <button class="ghost" type="button" data-day-action="today">
+                  Today
+                </button>
+              </div>
+            </div>
+            <div class="list scroll" id="log-list"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <%- include("partials/confirm-modal") %>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
