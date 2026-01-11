@@ -1,10 +1,13 @@
-FROM node:20-alpine
+FROM node:20-bookworm-slim
 
 WORKDIR /app
 ENV DATABASE_URL="file:./data/nutrition.db"
 
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && npm ci
 
 COPY prisma ./prisma
 RUN npx prisma generate
