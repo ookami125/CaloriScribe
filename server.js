@@ -1,8 +1,10 @@
 const fs = require("fs");
 const http = require("http");
 const https = require("https");
+const crypto = require("crypto");
 const express = require("express");
 const { PrismaClient } = require("@prisma/client");
+const { verifyPassword } = require("./lib/auth");
 const {
   parseServingLabel,
   convertMass,
@@ -18,11 +20,39 @@ const prisma = new PrismaClient();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json({ limit: "1mb" }));
-app.use(express.static("public"));
+app.use(express.json({ limit: "10mb" }));
+app.set("trust proxy", 1);
 
 const asyncHandler = (handler) => (req, res, next) =>
   Promise.resolve(handler(req, res, next)).catch(next);
+
+const attachUser = asyncHandler(async (req, res, next) => {
+  const token = getSessionToken(req);
+  if (!token) {
+    return next();
+  }
+  const session = await prisma.session.findFirst({
+    where: {
+      token,
+      expiresAt: { gt: new Date() },
+    },
+    include: { user: true },
+  });
+  if (session) {
+    req.user = session.user;
+    req.session = session;
+  }
+  return next();
+});
+
+const requireAuth = (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ error: "Unauthorized." });
+  }
+  return next();
+};
+
+app.use(attachUser);
 
 const parseNumber = (value, fallback = 0) => {
   const parsed = Number(value);
@@ -41,6 +71,11 @@ const parseOptionalString = (value) => {
   const trimmed = String(value ?? "").trim();
   return trimmed ? trimmed : null;
 };
+
+const normalizeNameKey = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase();
 
 const isBlank = (value) => value === null || value === undefined || value === "";
 
@@ -63,6 +98,40 @@ const parsePositiveInt = (value, fallback = null) => {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 };
 
+const buildIngredientPayload = (ingredient, userId) => {
+  const name = String(ingredient?.name || "").trim();
+  const unit = String(ingredient?.unit || "").trim();
+  if (!name || !unit) {
+    return null;
+  }
+  return {
+    name,
+    barcode: parseOptionalString(ingredient?.barcode),
+    calories: parseNumber(ingredient?.calories),
+    protein: parseNumber(ingredient?.protein),
+    carbs: parseNumber(ingredient?.carbs),
+    fat: parseNumber(ingredient?.fat),
+    unit,
+    servingSize: parseOptionalString(ingredient?.servingSize),
+    servingsPerContainer: parseOptionalString(ingredient?.servingsPerContainer),
+    saturatedFat: parseOptionalNumber(ingredient?.saturatedFat),
+    transFat: parseOptionalNumber(ingredient?.transFat),
+    cholesterolMg: parseOptionalNumber(ingredient?.cholesterolMg),
+    sodiumMg: parseOptionalNumber(ingredient?.sodiumMg),
+    dietaryFiber: parseOptionalNumber(ingredient?.dietaryFiber),
+    totalSugars: parseOptionalNumber(ingredient?.totalSugars),
+    addedSugars: parseOptionalNumber(ingredient?.addedSugars),
+    vitaminDMcg: parseOptionalNumber(ingredient?.vitaminDMcg),
+    calciumMg: parseOptionalNumber(ingredient?.calciumMg),
+    ironMg: parseOptionalNumber(ingredient?.ironMg),
+    potassiumMg: parseOptionalNumber(ingredient?.potassiumMg),
+    ingredientsList: parseOptionalString(ingredient?.ingredientsList),
+    vitamins: parseOptionalString(ingredient?.vitamins),
+    allergens: parseOptionalString(ingredient?.allergens),
+    userId,
+  };
+};
+
 const TARGET_LANGUAGE = (process.env.TARGET_LANGUAGE || "en").toLowerCase();
 const REQUEST_TIMEOUT_MS = Number.parseInt(
   process.env.REQUEST_TIMEOUT_MS || "",
@@ -81,6 +150,15 @@ const BARCODE_CACHE_TTL =
     ? BARCODE_CACHE_TTL_MS
     : 6 * 60 * 60 * 1000;
 const barcodeLookupCache = new Map();
+const SESSION_COOKIE_NAME = "nutrition_session";
+const SESSION_TTL_DAYS = Number.parseInt(
+  process.env.SESSION_TTL_DAYS || "",
+  10
+);
+const SESSION_TTL_MS =
+  Number.isFinite(SESSION_TTL_DAYS) && SESSION_TTL_DAYS > 0
+    ? SESSION_TTL_DAYS * 24 * 60 * 60 * 1000
+    : 30 * 24 * 60 * 60 * 1000;
 
 const stripLanguagePrefix = (value) => {
   const trimmed = String(value || "").trim();
@@ -121,6 +199,42 @@ const resolveServingUnit = (servingLabel, fallback = "serving") => {
     return parsed.unit;
   }
   return fallback;
+};
+
+const parseCookies = (header) => {
+  const cookies = {};
+  if (!header) {
+    return cookies;
+  }
+  header.split(";").forEach((pair) => {
+    const [rawKey, ...rest] = pair.trim().split("=");
+    if (!rawKey) {
+      return;
+    }
+    cookies[rawKey] = decodeURIComponent(rest.join("="));
+  });
+  return cookies;
+};
+
+const getSessionToken = (req) => {
+  const cookies = parseCookies(req.headers.cookie || "");
+  return cookies[SESSION_COOKIE_NAME] || "";
+};
+
+const buildSessionCookie = (token, options = {}) => {
+  const parts = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+  ];
+  if (options.maxAge !== undefined) {
+    parts.push(`Max-Age=${options.maxAge}`);
+  }
+  if (options.secure) {
+    parts.push("Secure");
+  }
+  return parts.join("; ");
 };
 
 const getBarcodeCacheKey = (barcode, provider) => `${provider}:${barcode}`;
@@ -653,13 +767,382 @@ const formatLogEntry = (entry) => {
   };
 };
 
-const buildRecipeItems = async (items) => {
+app.post(
+  "/api/login",
+  asyncHandler(async (req, res) => {
+    const username = String(req.body.username || "").trim().toLowerCase();
+    const password = String(req.body.password || "");
+    if (!username || !password) {
+      return res
+        .status(400)
+        .json({ error: "Username and password are required." });
+    }
+    const user = await prisma.user.findUnique({ where: { username } });
+    if (!user) {
+      return res.status(401).json({ error: "Invalid credentials." });
+    }
+    const isValid = await verifyPassword(password, user.passwordHash);
+    if (!isValid) {
+      return res.status(401).json({ error: "Invalid credentials." });
+    }
+    const token = crypto.randomBytes(32).toString("hex");
+    const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
+    await prisma.session.create({
+      data: {
+        token,
+        expiresAt,
+        userId: user.id,
+      },
+    });
+    const secure = req.secure || process.env.HTTPS === "true";
+    res.setHeader(
+      "Set-Cookie",
+      buildSessionCookie(token, {
+        maxAge: Math.floor(SESSION_TTL_MS / 1000),
+        secure,
+      })
+    );
+    return res.json({ username: user.username });
+  })
+);
+
+app.post(
+  "/api/logout",
+  asyncHandler(async (req, res) => {
+    const token = getSessionToken(req);
+    if (token) {
+      await prisma.session.deleteMany({ where: { token } });
+    }
+    const secure = req.secure || process.env.HTTPS === "true";
+    res.setHeader(
+      "Set-Cookie",
+      buildSessionCookie("", { maxAge: 0, secure })
+    );
+    return res.status(204).end();
+  })
+);
+
+app.get(
+  "/api/me",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    res.json({ username: req.user.username });
+  })
+);
+
+app.get(
+  "/api/export",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+    const [ingredients, recipes, logs, targets] = await Promise.all([
+      prisma.ingredient.findMany({
+        where: { userId },
+        orderBy: { name: "asc" },
+      }),
+      prisma.recipe.findMany({
+        where: { userId },
+        orderBy: { name: "asc" },
+        include: {
+          items: {
+            include: { ingredient: true },
+          },
+        },
+      }),
+      prisma.logEntry.findMany({
+        where: { userId },
+        orderBy: { consumedAt: "desc" },
+        include: {
+          ingredient: true,
+          recipe: {
+            include: {
+              items: {
+                include: { ingredient: true },
+              },
+            },
+          },
+        },
+      }),
+      prisma.dailyTarget.findUnique({
+        where: { userId },
+      }),
+    ]);
+
+    res.json({
+      exportedAt: new Date().toISOString(),
+      version: 1,
+      user: {
+        username: req.user.username,
+        createdAt: req.user.createdAt,
+      },
+      targets,
+      ingredients,
+      recipes,
+      logs,
+    });
+  })
+);
+
+app.post(
+  "/api/import",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const payload =
+      req.body && Array.isArray(req.body.ingredients)
+        ? req.body
+        : req.body?.data;
+    if (!payload) {
+      return res.status(400).json({ error: "Invalid import payload." });
+    }
+    const mode = String(req.body?.mode || "merge").toLowerCase();
+    if (!["merge", "replace"].includes(mode)) {
+      return res.status(400).json({ error: "Unknown import mode." });
+    }
+
+    const ingredients = Array.isArray(payload.ingredients)
+      ? payload.ingredients
+      : [];
+    const recipes = Array.isArray(payload.recipes) ? payload.recipes : [];
+    const logs = Array.isArray(payload.logs) ? payload.logs : [];
+    const targets = payload.targets || null;
+
+    const summary = {
+      ingredients: { created: 0, reused: 0, skipped: 0 },
+      recipes: { created: 0, skipped: 0 },
+      logs: { created: 0, skipped: 0 },
+      targets: targets ? "updated" : "skipped",
+    };
+
+    await prisma.$transaction(async (tx) => {
+      if (mode === "replace") {
+        await tx.logEntry.deleteMany({ where: { userId: req.user.id } });
+        await tx.recipeIngredient.deleteMany({
+          where: { recipe: { userId: req.user.id } },
+        });
+        await tx.recipe.deleteMany({ where: { userId: req.user.id } });
+        await tx.ingredient.deleteMany({ where: { userId: req.user.id } });
+        await tx.dailyTarget.deleteMany({ where: { userId: req.user.id } });
+      }
+
+      const existingIngredients = await tx.ingredient.findMany({
+        where: { userId: req.user.id, deletedAt: null },
+        select: { id: true, barcode: true, name: true, unit: true },
+      });
+      const ingredientById = new Map(
+        existingIngredients.map((item) => [item.id, item])
+      );
+      const existingByBarcode = new Map();
+      const existingByName = new Map();
+      existingIngredients.forEach((item) => {
+        if (item.barcode) {
+          existingByBarcode.set(item.barcode, item);
+        }
+        const nameKey = normalizeNameKey(item.name);
+        if (nameKey) {
+          existingByName.set(nameKey, item);
+        }
+      });
+
+      const createdByBarcode = new Map();
+      const createdByName = new Map();
+      const ingredientIdMap = new Map();
+
+      for (const ingredient of ingredients) {
+        const originalId = ingredient?.id;
+        const barcode = parseOptionalString(ingredient?.barcode);
+        const nameKey = normalizeNameKey(ingredient?.name);
+        let matched =
+          (barcode && (existingByBarcode.get(barcode) || createdByBarcode.get(barcode))) ||
+          (nameKey && (existingByName.get(nameKey) || createdByName.get(nameKey)));
+
+        if (matched) {
+          ingredientIdMap.set(originalId, matched.id);
+          summary.ingredients.reused += 1;
+          continue;
+        }
+
+        const data = buildIngredientPayload(ingredient, req.user.id);
+        if (!data) {
+          summary.ingredients.skipped += 1;
+          continue;
+        }
+
+        const created = await tx.ingredient.create({ data });
+        ingredientIdMap.set(originalId, created.id);
+        ingredientById.set(created.id, created);
+        summary.ingredients.created += 1;
+        if (created.barcode) {
+          createdByBarcode.set(created.barcode, created);
+        }
+        const createdNameKey = normalizeNameKey(created.name);
+        if (createdNameKey) {
+          createdByName.set(createdNameKey, created);
+        }
+      }
+
+      const recipeIdMap = new Map();
+      for (const recipe of recipes) {
+        const name = String(recipe?.name || "").trim();
+        if (!name) {
+          summary.recipes.skipped += 1;
+          continue;
+        }
+        const items = Array.isArray(recipe?.items) ? recipe.items : [];
+        const mappedItems = [];
+
+        for (const item of items) {
+          const mappedIngredientId = ingredientIdMap.get(item?.ingredientId);
+          if (!mappedIngredientId) {
+            continue;
+          }
+          const ingredient = ingredientById.get(mappedIngredientId);
+          const unit = String(item?.unit || "").trim() || ingredient?.unit || "";
+          const quantity = parseNumber(item?.quantity, 1);
+          if (!unit) {
+            continue;
+          }
+          const normalized = normalizeIngredientQuantity(
+            ingredient,
+            quantity,
+            unit
+          );
+          if (normalized.error) {
+            continue;
+          }
+          mappedItems.push({
+            ingredientId: mappedIngredientId,
+            quantity,
+            unit,
+          });
+        }
+
+        if (!mappedItems.length) {
+          summary.recipes.skipped += 1;
+          continue;
+        }
+
+        const servings = parseNumber(recipe?.servings, 1);
+        const created = await tx.recipe.create({
+          data: {
+            name,
+            notes: parseOptionalString(recipe?.notes),
+            servings: servings > 0 ? Math.round(servings) : 1,
+            userId: req.user.id,
+            items: {
+              create: mappedItems,
+            },
+          },
+        });
+        recipeIdMap.set(recipe?.id, created.id);
+        summary.recipes.created += 1;
+      }
+
+      for (const entry of logs) {
+        const mappedIngredientId = entry?.ingredientId
+          ? ingredientIdMap.get(entry.ingredientId)
+          : null;
+        const mappedRecipeId = entry?.recipeId
+          ? recipeIdMap.get(entry.recipeId)
+          : null;
+        if ((mappedIngredientId && mappedRecipeId) || (!mappedIngredientId && !mappedRecipeId)) {
+          summary.logs.skipped += 1;
+          continue;
+        }
+        const quantity = parseNumber(entry?.quantity, 1);
+        const consumedAt = parseDate(entry?.consumedAt);
+        let unit = String(entry?.unit || "").trim();
+
+        if (mappedIngredientId) {
+          const ingredient = ingredientById.get(mappedIngredientId);
+          if (!unit) {
+            unit = ingredient?.unit || "";
+          }
+          const normalized = normalizeIngredientQuantity(
+            ingredient,
+            quantity,
+            unit
+          );
+          if (normalized.error) {
+            summary.logs.skipped += 1;
+            continue;
+          }
+        }
+
+        if (mappedRecipeId) {
+          if (!unit) {
+            unit = "serving";
+          }
+          const normalized = normalizeRecipeQuantity(quantity, unit);
+          if (normalized.error) {
+            summary.logs.skipped += 1;
+            continue;
+          }
+        }
+
+        await tx.logEntry.create({
+          data: {
+            ingredientId: mappedIngredientId,
+            recipeId: mappedRecipeId,
+            quantity,
+            unit,
+            notes: parseOptionalString(entry?.notes),
+            consumedAt,
+            userId: req.user.id,
+          },
+        });
+        summary.logs.created += 1;
+      }
+
+      if (targets) {
+        const data = {
+          calories: parseOptionalNumber(targets?.calories),
+          protein: parseOptionalNumber(targets?.protein),
+          carbs: parseOptionalNumber(targets?.carbs),
+          fat: parseOptionalNumber(targets?.fat),
+        };
+        await tx.dailyTarget.upsert({
+          where: { userId: req.user.id },
+          update: data,
+          create: { ...data, userId: req.user.id },
+        });
+      }
+    });
+
+    res.json(summary);
+  })
+);
+
+app.use("/api", requireAuth);
+
+app.get("/login", (req, res) => res.redirect("/login.html"));
+
+app.use((req, res, next) => {
+  const isHtmlRequest = req.path === "/" || req.path.endsWith(".html");
+  if (!isHtmlRequest) {
+    return next();
+  }
+  const isLoginPage = req.path === "/login.html" || req.path === "/login";
+  if (req.user) {
+    if (isLoginPage) {
+      return res.redirect("/index.html");
+    }
+    return next();
+  }
+  if (isLoginPage) {
+    return next();
+  }
+  return res.redirect("/login.html");
+});
+
+app.use(express.static("public"));
+
+const buildRecipeItems = async (items, userId) => {
   const ingredientIds = items
     .map((item) => Number(item.ingredientId))
     .filter((id) => Number.isFinite(id));
   const uniqueIngredientIds = Array.from(new Set(ingredientIds));
   const ingredients = await prisma.ingredient.findMany({
-    where: { id: { in: uniqueIngredientIds } },
+    where: { id: { in: uniqueIngredientIds }, userId, deletedAt: null },
   });
   if (ingredients.length !== uniqueIngredientIds.length) {
     return { error: "Ingredient not found." };
@@ -701,7 +1184,7 @@ app.get(
   "/api/ingredients",
   asyncHandler(async (req, res) => {
     const { barcode, search } = req.query;
-    const where = {};
+    const where = { userId: req.user.id, deletedAt: null };
     if (barcode) {
       where.barcode = String(barcode);
     }
@@ -734,7 +1217,7 @@ app.get(
     }
 
     const existing = await prisma.ingredient.findFirst({
-      where: { barcode },
+      where: { barcode, userId: req.user.id, deletedAt: null },
     });
     if (existing) {
       return res.json({ source: "local", ingredient: existing });
@@ -862,6 +1345,7 @@ app.post(
       ingredientsList: parseOptionalString(req.body.ingredientsList),
       vitamins: parseOptionalString(req.body.vitamins),
       allergens: parseOptionalString(req.body.allergens),
+      userId: req.user.id,
     };
 
     if (!data.name) {
@@ -905,6 +1389,12 @@ app.put(
       return res
         .status(400)
         .json({ error: `${invalidField} must be a number.` });
+    }
+    const existing = await prisma.ingredient.findFirst({
+      where: { id: ingredientId, userId: req.user.id, deletedAt: null },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: "Ingredient not found." });
     }
     const data = {
       name: String(req.body.name || "").trim(),
@@ -951,7 +1441,13 @@ app.delete(
     if (!Number.isFinite(ingredientId)) {
       return res.status(400).json({ error: "Invalid ingredient id." });
     }
-    await prisma.ingredient.delete({ where: { id: ingredientId } });
+    const result = await prisma.ingredient.updateMany({
+      where: { id: ingredientId, userId: req.user.id, deletedAt: null },
+      data: { deletedAt: new Date(), barcode: null },
+    });
+    if (!result.count) {
+      return res.status(404).json({ error: "Ingredient not found." });
+    }
     res.status(204).end();
   })
 );
@@ -960,6 +1456,7 @@ app.get(
   "/api/recipes",
   asyncHandler(async (req, res) => {
     const recipes = await prisma.recipe.findMany({
+      where: { userId: req.user.id, deletedAt: null },
       orderBy: { name: "asc" },
       include: {
         items: {
@@ -996,7 +1493,7 @@ app.post(
         .json({ error: "Add at least one ingredient item." });
     }
 
-    const { payloadItems, error } = await buildRecipeItems(items);
+    const { payloadItems, error } = await buildRecipeItems(items, req.user.id);
     if (error) {
       return res.status(400).json({ error });
     }
@@ -1006,6 +1503,7 @@ app.post(
         name,
         notes,
         servings: servings > 0 ? Math.round(servings) : 1,
+        userId: req.user.id,
         items: {
           create: payloadItems,
         },
@@ -1050,7 +1548,7 @@ app.put(
         .json({ error: "Add at least one ingredient item." });
     }
 
-    const { payloadItems, error } = await buildRecipeItems(items);
+    const { payloadItems, error } = await buildRecipeItems(items, req.user.id);
     if (error) {
       return res.status(400).json({ error });
     }
@@ -1089,7 +1587,13 @@ app.delete(
     if (!Number.isFinite(recipeId)) {
       return res.status(400).json({ error: "Invalid recipe id." });
     }
-    await prisma.recipe.delete({ where: { id: recipeId } });
+    const result = await prisma.recipe.updateMany({
+      where: { id: recipeId, userId: req.user.id, deletedAt: null },
+      data: { deletedAt: new Date() },
+    });
+    if (!result.count) {
+      return res.status(404).json({ error: "Recipe not found." });
+    }
     res.status(204).end();
   })
 );
@@ -1100,7 +1604,7 @@ app.get(
     const dateRange = parseDateRange(req.query.date);
     const limit = parsePositiveInt(req.query.limit);
     const offset = parsePositiveInt(req.query.offset);
-    const where = {};
+    const where = { userId: req.user.id };
     if (dateRange) {
       where.consumedAt = {
         gte: dateRange.start,
@@ -1127,8 +1631,10 @@ app.get(
   })
 );
 
-const getOrCreateTargets = async () => {
-  const existing = await prisma.dailyTarget.findFirst();
+const getOrCreateTargets = async (userId) => {
+  const existing = await prisma.dailyTarget.findUnique({
+    where: { userId },
+  });
   if (existing) {
     return existing;
   }
@@ -1138,6 +1644,7 @@ const getOrCreateTargets = async () => {
       protein: null,
       carbs: null,
       fat: null,
+      userId,
     },
   });
 };
@@ -1145,7 +1652,7 @@ const getOrCreateTargets = async () => {
 app.get(
   "/api/targets",
   asyncHandler(async (req, res) => {
-    const targets = await getOrCreateTargets();
+    const targets = await getOrCreateTargets(req.user.id);
     res.json(targets);
   })
 );
@@ -1153,7 +1660,7 @@ app.get(
 app.put(
   "/api/targets",
   asyncHandler(async (req, res) => {
-    const existing = await getOrCreateTargets();
+    const existing = await getOrCreateTargets(req.user.id);
     const invalidField = findInvalidNumberField(req.body, [
       "calories",
       "protein",
@@ -1202,8 +1709,8 @@ app.post(
     const quantity = parseNumber(req.body.quantity, 1);
     let unit = req.body.unit ? String(req.body.unit).trim() : "";
     if (ingredientId) {
-      const ingredient = await prisma.ingredient.findUnique({
-        where: { id: ingredientId },
+      const ingredient = await prisma.ingredient.findFirst({
+        where: { id: ingredientId, userId: req.user.id, deletedAt: null },
       });
       if (!ingredient) {
         return res.status(404).json({ error: "Ingredient not found." });
@@ -1222,8 +1729,8 @@ app.post(
     }
 
     if (recipeId) {
-      const recipe = await prisma.recipe.findUnique({
-        where: { id: recipeId },
+      const recipe = await prisma.recipe.findFirst({
+        where: { id: recipeId, userId: req.user.id, deletedAt: null },
       });
       if (!recipe) {
         return res.status(404).json({ error: "Recipe not found." });
@@ -1245,6 +1752,7 @@ app.post(
         unit,
         notes: req.body.notes ? String(req.body.notes).trim() : null,
         consumedAt: parseDate(req.body.consumedAt),
+        userId: req.user.id,
       },
       include: {
         ingredient: true,
@@ -1267,7 +1775,12 @@ app.delete(
     if (!Number.isFinite(entryId)) {
       return res.status(400).json({ error: "Invalid log id." });
     }
-    await prisma.logEntry.delete({ where: { id: entryId } });
+    const result = await prisma.logEntry.deleteMany({
+      where: { id: entryId, userId: req.user.id },
+    });
+    if (!result.count) {
+      return res.status(404).json({ error: "Log entry not found." });
+    }
     res.status(204).end();
   })
 );

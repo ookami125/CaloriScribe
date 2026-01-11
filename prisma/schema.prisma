@@ -10,7 +10,7 @@ datasource db {
 model Ingredient {
   id           Int                @id @default(autoincrement())
   name         String
-  barcode      String?            @unique
+  barcode      String?
   calories     Float
   protein      Float
   carbs        Float
@@ -32,10 +32,17 @@ model Ingredient {
   ingredientsList     String?
   vitamins            String?
   allergens           String?
+  deletedAt    DateTime?
+  userId       Int
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt    DateTime           @default(now())
   updatedAt    DateTime           @updatedAt
   recipeItems  RecipeIngredient[]
   logEntries   LogEntry[]
+
+  @@index([userId])
+  @@index([userId, deletedAt])
+  @@unique([userId, barcode])
 }
 
 model Recipe {
@@ -43,10 +50,16 @@ model Recipe {
   name       String
   notes      String?
   servings   Int                @default(1)
+  deletedAt  DateTime?
+  userId     Int
+  user       User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt  DateTime           @default(now())
   updatedAt  DateTime           @updatedAt
   items      RecipeIngredient[]
   logEntries LogEntry[]
+
+  @@index([userId])
+  @@index([userId, deletedAt])
 }
 
 model RecipeIngredient {
@@ -67,11 +80,14 @@ model LogEntry {
   ingredientId Int?
   recipeId     Int?
   notes        String?
+  userId       Int
   createdAt    DateTime   @default(now())
   ingredient   Ingredient? @relation(fields: [ingredientId], references: [id], onDelete: SetNull)
   recipe       Recipe?     @relation(fields: [recipeId], references: [id], onDelete: SetNull)
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([consumedAt])
+  @@index([userId])
 }
 
 model DailyTarget {
@@ -80,6 +96,34 @@ model DailyTarget {
   protein   Float?
   carbs     Float?
   fat       Float?
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@unique([userId])
+}
+
+model User {
+  id           Int        @id @default(autoincrement())
+  username     String     @unique
+  passwordHash String
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  sessions     Session[]
+  ingredients  Ingredient[]
+  recipes      Recipe[]
+  logEntries   LogEntry[]
+  targets      DailyTarget[]
+}
+
+model Session {
+  id        Int      @id @default(autoincrement())
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
 }

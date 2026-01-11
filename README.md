@@ -59,6 +59,18 @@ This app uses Prisma, so you can swap SQLite for PostgreSQL, MySQL, or other sup
 - Barcode scanning requires a secure context (`https` or `http://localhost`).
 - If the browser does not support `BarcodeDetector`, use the barcode input field manually.
 
+## Login (invite-only)
+Create users manually and sign in at `/login.html`.
+
+```bash
+npm run create:user -- username password
+```
+
+If you already have data, the auth migration requires assigning `userId` values. For a clean start, reset the SQLite database and re-run migrations.
+
+## Import/export
+Use the dashboard buttons to export a JSON file or import one back in. Imports default to merge (existing ingredients match on barcode or name).
+
 ## Barcode lookup providers
 Barcode lookup defaults to Open Food Facts when no API keys are configured. Add keys to `.env` to enable USDA or Nutritionix.
 

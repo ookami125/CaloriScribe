@@ -6,6 +6,7 @@
     "dev": "node server.js",
     "start": "node server.js",
     "lookup:barcode": "node scripts/lookup-barcode.js",
+    "create:user": "node scripts/create-user.js",
     "test": "node scripts/test-units.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev"

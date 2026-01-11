@@ -54,6 +54,11 @@ const elements = {
   scanVideo: qs("#scan-video"),
   scanStatus: qs("#scan-status"),
   closeScan: qs("#close-scan"),
+  logoutButton: qs("#logout-button"),
+  exportButton: qs("#export-button"),
+  importButton: qs("#import-button"),
+  importFile: qs("#import-file"),
+  importStatus: qs("#import-status"),
 };
 
 let editingIngredientId = null;
@@ -82,6 +87,10 @@ const api = async (path, options = {}) => {
   });
 
   if (!response.ok) {
+    if (response.status === 401) {
+      window.location.href = "/login.html";
+      throw new Error("Unauthorized");
+    }
     const payload = await response.json().catch(() => ({}));
     throw new Error(payload.error || "Request failed");
   }
@@ -91,6 +100,28 @@ const api = async (path, options = {}) => {
   }
 
   return response.json();
+};
+
+const downloadJson = (data, filename) => {
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+};
+
+const setActionStatus = (element, message, tone = "") => {
+  if (!element) {
+    return;
+  }
+  element.textContent = message;
+  element.style.color = tone === "error" ? "#b42318" : "";
 };
 
 const buildLogsUrl = (dateValue) => {
@@ -478,7 +509,29 @@ const renderIngredients = () => {
       }
     });
 
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "ghost";
+    deleteButton.textContent = "Delete";
+    deleteButton.addEventListener("click", async () => {
+      const confirmed = window.confirm(
+        `Delete ${ingredient.name}? Recipes and logs will keep the ingredient details.`
+      );
+      if (!confirmed) {
+        return;
+      }
+      try {
+        setStatus(elements.ingredientStatus, "Deleting...");
+        await api(`/api/ingredients/${ingredient.id}`, { method: "DELETE" });
+        await refreshData();
+        setStatus(elements.ingredientStatus, "Ingredient deleted.");
+      } catch (error) {
+        setStatus(elements.ingredientStatus, error.message, "error");
+      }
+    });
+
     actions.appendChild(editButton);
+    actions.appendChild(deleteButton);
 
     card.append(title, summary, barcode);
     if (details) {
@@ -604,10 +657,37 @@ const renderRecipes = () => {
 
     const details = buildDetails("Full recipe details", entries);
 
+    const actions = document.createElement("div");
+    actions.className = "actions";
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "ghost";
+    deleteButton.textContent = "Delete";
+    deleteButton.addEventListener("click", async () => {
+      const confirmed = window.confirm(
+        `Delete ${recipe.name}? Logged intakes will keep the recipe details.`
+      );
+      if (!confirmed) {
+        return;
+      }
+      try {
+        setStatus(elements.recipeStatus, "Deleting...");
+        await api(`/api/recipes/${recipe.id}`, { method: "DELETE" });
+        await refreshData();
+        setStatus(elements.recipeStatus, "Recipe deleted.");
+      } catch (error) {
+        setStatus(elements.recipeStatus, error.message, "error");
+      }
+    });
+
+    actions.appendChild(deleteButton);
+
     card.append(title, summary, perServing);
     if (details) {
       card.appendChild(details);
     }
+    card.appendChild(actions);
 
     elements.recipeList.appendChild(card);
   });
@@ -682,10 +762,35 @@ const renderLogList = () => {
 
     const details = buildDetails("Full entry details", detailEntries);
 
+    const actions = document.createElement("div");
+    actions.className = "actions";
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "ghost";
+    deleteButton.textContent = "Delete";
+    deleteButton.addEventListener("click", async () => {
+      const confirmed = window.confirm("Delete this log entry?");
+      if (!confirmed) {
+        return;
+      }
+      try {
+        setStatus(elements.logStatus, "Deleting...");
+        await api(`/api/logs/${entry.id}`, { method: "DELETE" });
+        await refreshLogs(getSelectedDayValue());
+        setStatus(elements.logStatus, "Log entry deleted.");
+      } catch (error) {
+        setStatus(elements.logStatus, error.message, "error");
+      }
+    });
+
+    actions.appendChild(deleteButton);
+
     card.append(title, meta, macros);
     if (details) {
       card.appendChild(details);
     }
+    card.appendChild(actions);
 
     elements.logList.appendChild(card);
   });
@@ -1166,7 +1271,7 @@ const setupNavToggle = () => {
       toggle.setAttribute("aria-expanded", String(isOpen));
     });
 
-    qsa("a", nav).forEach((link) => {
+    qsa("a, button", nav).forEach((link) => {
       link.addEventListener("click", closeMenu);
     });
   });
@@ -1434,6 +1539,80 @@ const wireForms = () => {
         setStatus(elements.targetStatus, "Targets saved.");
       } catch (error) {
         setStatus(elements.targetStatus, error.message, "error");
+      }
+    });
+  }
+
+  if (elements.exportButton) {
+    elements.exportButton.addEventListener("click", async () => {
+      const button = elements.exportButton;
+      const originalLabel = button.textContent;
+      button.disabled = true;
+      button.textContent = "Exporting...";
+      try {
+        const data = await api("/api/export");
+        const stamp = toDateInputValue(new Date());
+        downloadJson(data, `caloriscribe-export-${stamp}.json`);
+      } catch (error) {
+        button.textContent = "Export failed";
+        setTimeout(() => {
+          button.textContent = originalLabel;
+        }, 2000);
+        return;
+      } finally {
+        button.disabled = false;
+      }
+      button.textContent = originalLabel;
+    });
+  }
+
+  if (elements.importButton && elements.importFile) {
+    elements.importButton.addEventListener("click", () => {
+      elements.importFile.click();
+    });
+
+    elements.importFile.addEventListener("change", async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) {
+        return;
+      }
+      const button = elements.importButton;
+      const originalLabel = button.textContent;
+      button.disabled = true;
+      button.textContent = "Importing...";
+      setActionStatus(elements.importStatus, "");
+      try {
+        const text = await file.text();
+        const payload = JSON.parse(text);
+        const result = await api("/api/import", {
+          method: "POST",
+          body: payload,
+        });
+        const message = `Imported ${result.ingredients.created} ingredients, ${result.recipes.created} recipes, ${result.logs.created} logs.`;
+        setActionStatus(elements.importStatus, message);
+        await refreshData();
+      } catch (error) {
+        setActionStatus(
+          elements.importStatus,
+          error.message || "Import failed.",
+          "error"
+        );
+      } finally {
+        button.disabled = false;
+        button.textContent = originalLabel;
+        elements.importFile.value = "";
+      }
+    });
+  }
+
+  if (elements.logoutButton) {
+    elements.logoutButton.addEventListener("click", async () => {
+      try {
+        await api("/api/logout", { method: "POST" });
+      } catch (error) {
+        // Ignore logout errors and force redirect.
+      } finally {
+        window.location.href = "/login.html";
       }
     });
   }

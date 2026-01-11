@@ -110,7 +110,8 @@ body {
   text-transform: uppercase;
 }
 
-.nav-links a {
+.nav-links a,
+.nav-links button {
   text-decoration: none;
   color: var(--ink);
   padding: 8px 14px;
@@ -118,6 +119,8 @@ body {
   border: 1px solid rgba(20, 19, 22, 0.12);
   font-size: 14px;
   white-space: nowrap;
+  background: transparent;
+  cursor: pointer;
 }
 
 .nav-links a.active {
@@ -222,6 +225,12 @@ button.primary:hover,
   gap: 10px;
   flex-wrap: wrap;
   align-items: flex-end;
+}
+
+.action-status {
+  flex-basis: 100%;
+  font-size: 13px;
+  color: var(--muted);
 }
 
 .hero-grid {
@@ -691,7 +700,8 @@ textarea {
     display: flex;
   }
 
-  .nav-links a {
+  .nav-links a,
+  .nav-links button {
     width: 100%;
   }
 

@@ -31,6 +31,9 @@
         <a href="ingredients.html">Ingredients</a>
         <a href="recipes.html">Recipes</a>
         <a href="log.html">Log Intake</a>
+        <button class="nav-logout" id="logout-button" type="button">
+          Log out
+        </button>
       </nav>
     </header>
 
@@ -75,6 +78,19 @@
               Add ingredient
             </a>
             <a class="ghost button-link" href="log.html">Log intake</a>
+            <button class="ghost" type="button" id="export-button">
+              Export data
+            </button>
+            <button class="ghost" type="button" id="import-button">
+              Import data
+            </button>
+            <input
+              id="import-file"
+              type="file"
+              accept="application/json"
+              hidden
+            />
+            <span class="action-status" id="import-status"></span>
           </div>
         </div>
         <div class="hero-grid">
