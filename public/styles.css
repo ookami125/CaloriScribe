@@ -59,6 +59,21 @@ body {
   font-family: "Fraunces", "Times New Roman", serif;
   font-size: 26px;
   letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-icon {
+  width: 24px;
+  height: 24px;
+  display: inline-block;
+}
+
+.brand-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .nav-links {
