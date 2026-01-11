@@ -10,7 +10,8 @@
     "password:user": "node scripts/change-password.js",
     "test": "node scripts/test-units.js",
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev"
+    "prisma:migrate": "prisma migrate dev",
+    "dump:db": "node scripts/dump-db.js"
   },
   "dependencies": {
     "@prisma/client": "^5.19.1",
