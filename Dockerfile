@@ -14,6 +14,7 @@ RUN npx prisma generate
 
 COPY lib ./lib
 COPY public ./public
+COPY views ./views
 COPY scripts ./scripts
 COPY server.js ./server.js
 
