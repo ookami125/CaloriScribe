@@ -81,9 +81,7 @@ const asyncHandler = (handler) => (req, res, next) =>
   Promise.resolve(handler(req, res, next)).catch(next);
 
 const getFoodUserByExternalId = async (externalId) =>
-  foodDb.get('SELECT * FROM "Users" WHERE "external_id" = ? LIMIT 1', [
-    externalId,
-  ]);
+  foodDb.getUserByExternalId(externalId);
 
 const ensureFoodUser = async (authUser) => {
   if (!authUser?.external_id) {
@@ -251,17 +249,13 @@ const loadNutrientLookup = async () => {
   if (nutrientLookupCache) {
     return nutrientLookupCache;
   }
-  const rows = await foodDb.all(
-    `SELECT "id", "name", "unit", "daily_value" FROM "Nutrients"`
-  );
+  const rows = await foodDb.listNutrients();
   nutrientLookupCache = new Map(rows.map((row) => [row.name, row]));
   return nutrientLookupCache;
 };
 
 const ensureNutrients = async () => {
-  const existing = await foodDb.all(
-    `SELECT "id", "name" FROM "Nutrients"`
-  );
+  const existing = await foodDb.listNutrients();
   const existingNames = new Set(existing.map((row) => row.name));
   const inserts = [];
   Object.entries(TARGET_CATALOG).forEach(([key, value]) => {
@@ -273,10 +267,11 @@ const ensureNutrients = async () => {
     return;
   }
   for (const item of inserts) {
-    await foodDb.run(
-      `INSERT INTO "Nutrients" ("name", "unit", "daily_value") VALUES (?, ?, ?)`,
-      [item.name, item.unit, item.dailyValue]
-    );
+    await foodDb.createNutrient({
+      name: item.name,
+      unit: item.unit,
+      dailyValue: item.dailyValue,
+    });
   }
   nutrientLookupCache = null;
 };
@@ -287,20 +282,14 @@ const ensureNutrient = async (key, unit = "g", dailyValue = 0) => {
   if (existing) {
     return existing;
   }
-  await foodDb.run(
-    `INSERT INTO "Nutrients" ("name", "unit", "daily_value") VALUES (?, ?, ?)`,
-    [key, unit, dailyValue]
-  );
+  await foodDb.createNutrient({ name: key, unit, dailyValue });
   nutrientLookupCache = null;
   return (await loadNutrientLookup()).get(key);
 };
 
 const ensureCoreTargets = async (userId) => {
-  const existing = await foodDb.get(
-    `SELECT 1 FROM "UsersDailyValues" WHERE "user_id" = ? LIMIT 1`,
-    [userId]
-  );
-  if (existing) {
+  const existingValues = await foodDb.listUserDailyValues(userId);
+  if (existingValues.length) {
     return;
   }
   await ensureNutrients();
@@ -310,24 +299,19 @@ const ensureCoreTargets = async (userId) => {
     if (!nutrient) {
       continue;
     }
-    await foodDb.run(
-      `INSERT INTO "UsersDailyValues" ("user_id", "nutrient_id", "label", "target_value", "allow_exceed")
-       VALUES (?, ?, ?, ?, ?)`,
-      [userId, nutrient.id, TARGET_CATALOG[key].label, 0, 0]
-    );
+    await foodDb.addUserDailyValue({
+      userId,
+      nutrientId: nutrient.id,
+      label: TARGET_CATALOG[key].label,
+      targetValue: 0,
+      allowExceed: 0,
+    });
   }
 };
 
 const getCustomTargetsForUser = async (userId) => {
   await ensureCoreTargets(userId);
-  const rows = await foodDb.all(
-    `SELECT udv.*, n.name, n.unit
-       FROM "UsersDailyValues" udv
-       JOIN "Nutrients" n ON n.id = udv.nutrient_id
-      WHERE udv.user_id = ?
-      ORDER BY COALESCE(udv.label, n.name) ASC`,
-    [userId]
-  );
+  const rows = await foodDb.listUserDailyValues(userId);
   return rows.map((row) => ({
     id: row.id,
     key: row.name,
@@ -407,40 +391,14 @@ const fetchFoods = async ({
   search,
   includeDeleted = false,
 } = {}) => {
-  const conditions = ['f.user_id = ?'];
-  const params = [userId];
-  if (!includeDeleted) {
-    conditions.push("f.is_deleted = 0");
-  }
-  if (isIngredient !== null) {
-    conditions.push("f.is_ingredient = ?");
-    params.push(isIngredient ? 1 : 0);
-  }
-  if (ids.length) {
-    conditions.push(`f.id IN (${ids.map(() => "?").join(",")})`);
-    params.push(...ids);
-  }
-  if (barcode) {
-    conditions.push("f.barcode = ?");
-    params.push(String(barcode));
-  }
-  if (search) {
-    conditions.push("LOWER(f.name) LIKE ?");
-    params.push(`%${String(search).toLowerCase()}%`);
-  }
-  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-  const rows = await foodDb.all(
-    `SELECT f.*, fau.label AS serving_label,
-            n.name AS nutrient_name, nif.amount AS nutrient_amount
-       FROM "Foods" f
-       LEFT JOIN "FoodAlternateUnits" fau
-         ON fau.food_id = f.id AND fau.is_default = 1
-       LEFT JOIN "NutrientsInFoods" nif ON nif.food_id = f.id
-       LEFT JOIN "Nutrients" n ON n.id = nif.nutrient_id
-       ${where}
-      ORDER BY f.name ASC`,
-    params
-  );
+  const rows = await foodDb.listFoodsWithNutrients({
+    userId,
+    isIngredient,
+    ids,
+    barcode,
+    search,
+    includeDeleted,
+  });
 
   const foodRows = new Map();
   const nutrientMap = new Map();
@@ -462,30 +420,12 @@ const fetchFoods = async ({
 };
 
 const fetchRecipes = async ({ userId, ids = [], includeDeleted = false } = {}) => {
-  const conditions = ['r.user_id = ?'];
-  const params = [userId];
-  if (!includeDeleted) {
-    conditions.push("r.is_deleted = 0");
-  }
-  if (ids.length) {
-    conditions.push(`r.id IN (${ids.map(() => "?").join(",")})`);
-    params.push(...ids);
-  }
-  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-  const recipeRows = await foodDb.all(
-    `SELECT r.* FROM "Recipes" r ${where} ORDER BY r.name ASC`,
-    params
-  );
+  const recipeRows = await foodDb.listRecipes({ userId, ids, includeDeleted });
   if (!recipeRows.length) {
     return { recipes: [], byId: new Map() };
   }
   const recipeIds = recipeRows.map((row) => row.id);
-  const itemRows = await foodDb.all(
-    `SELECT * FROM "FoodsInRecipes" WHERE "recipe_id" IN (${recipeIds
-      .map(() => "?")
-      .join(",")})`,
-    recipeIds
-  );
+  const itemRows = await foodDb.listFoodsInRecipes(recipeIds);
   const foodIds = Array.from(new Set(itemRows.map((row) => row.food_id)));
   const { byId: foodById } = await fetchFoods({
     userId,
@@ -519,10 +459,7 @@ const fetchRecipes = async ({ userId, ids = [], includeDeleted = false } = {}) =
 };
 
 const fetchLogsForExport = async (userId) => {
-  const rows = await foodDb.all(
-    `SELECT * FROM "UserIntakeLogs" WHERE "user_id" = ? ORDER BY "logged_at_epoch" DESC`,
-    [userId]
-  );
+  const rows = await foodDb.listUserIntakeLogs({ userId });
   if (!rows.length) {
     return [];
   }
@@ -559,11 +496,11 @@ const upsertFoodNutrients = async (foodId, nutrientValues) => {
     if (!nutrient) {
       continue;
     }
-    await foodDb.run(
-      `INSERT OR REPLACE INTO "NutrientsInFoods" ("food_id", "nutrient_id", "amount")
-       VALUES (?, ?, ?)`,
-      [foodId, nutrient.id, parseNumber(value, 0)]
-    );
+    await foodDb.upsertFoodNutrient({
+      foodId,
+      nutrientId: nutrient.id,
+      amount: parseNumber(value, 0),
+    });
   }
 };
 
@@ -611,15 +548,13 @@ const saveDefaultAlternateUnit = async (
     Number.isFinite(servingSize) && servingSize > 0 ? servingSize : 1;
   const safeUnit = servingUnit || "serving";
 
-  await foodDb.run(
-    `DELETE FROM "FoodAlternateUnits" WHERE "food_id" = ? AND "is_default" = 1`,
-    [foodId]
-  );
-  await foodDb.run(
-    `INSERT INTO "FoodAlternateUnits" ("food_id", "label", "quantity", "unit", "base_serving_multiplier", "is_default")
-     VALUES (?, ?, ?, ?, ?, 1)`,
-    [foodId, normalizedLabel, safeQuantity, safeUnit, 1]
-  );
+  await foodDb.setDefaultAlternateUnit({
+    foodId,
+    label: normalizedLabel,
+    quantity: safeQuantity,
+    unit: safeUnit,
+    baseServingMultiplier: 1,
+  });
 };
 
 const toIntakeDate = (date) => {
@@ -1519,36 +1454,20 @@ app.post(
       customTargets: { created: 0, updated: 0, skipped: 0 },
     };
 
-    await foodDb.run("BEGIN");
+    await foodDb.beginTransaction();
     try {
       if (mode === "replace") {
-        await foodDb.run(
-          `DELETE FROM "UserIntakeLogs" WHERE "user_id" = ?`,
-          [userId]
-        );
-        await foodDb.run(
-          `DELETE FROM "FoodsInRecipes" WHERE "recipe_id" IN (SELECT "id" FROM "Recipes" WHERE "user_id" = ?)`,
-          [userId]
-        );
-        await foodDb.run(
-          `DELETE FROM "Recipes" WHERE "user_id" = ?`,
-          [userId]
-        );
-        await foodDb.run(
-          `DELETE FROM "Foods" WHERE "user_id" = ?`,
-          [userId]
-        );
-        await foodDb.run(
-          `DELETE FROM "UsersDailyValues" WHERE "user_id" = ?`,
-          [userId]
-        );
+        await foodDb.deleteUserIntakeLogsByUser(userId);
+        await foodDb.deleteFoodsInRecipesByUser(userId);
+        await foodDb.deleteRecipesByUser(userId);
+        await foodDb.deleteFoodsByUser(userId);
+        await foodDb.deleteUserDailyValuesByUser(userId);
       }
 
-      const existingFoods = await foodDb.all(
-        `SELECT "id", "barcode", "name", "is_ingredient", "serving_unit", "serving_size" FROM "Foods"
-         WHERE "user_id" = ? AND "is_deleted" = 0`,
-        [userId]
-      );
+      const existingFoods = await foodDb.listFoodsBasic({
+        userId,
+        includeDeleted: false,
+      });
       const existingByBarcode = new Map();
       const existingByName = new Map();
       const foodMetaById = new Map();
@@ -1578,36 +1497,31 @@ app.post(
         if (!data) {
           return null;
         }
-        const result = await foodDb.run(
-          `INSERT INTO "Foods" ("user_id", "name", "barcode", "ingredients_list", "allergens_list",
-            "serving_size", "serving_unit", "servings_per_container", "is_ingredient")
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            userId,
-            data.name,
-            data.barcode,
-            data.ingredientsList,
-            data.allergensList,
-            data.servingSize,
-            data.servingUnit,
-            data.servingsPerContainer,
-            data.isIngredient ? 1 : 0,
-          ]
-        );
+        const foodId = await foodDb.createFood({
+          userId,
+          name: data.name,
+          barcode: data.barcode,
+          ingredientsList: data.ingredientsList,
+          allergensList: data.allergensList,
+          servingSize: data.servingSize,
+          servingUnit: data.servingUnit,
+          servingsPerContainer: data.servingsPerContainer,
+          isIngredient: data.isIngredient ? 1 : 0,
+        });
         const nutrients = buildFoodNutrientValues(payload);
-        await upsertFoodNutrients(result.lastID, nutrients);
+        await upsertFoodNutrients(foodId, nutrients);
         await saveDefaultAlternateUnit(
-          result.lastID,
+          foodId,
           data.servingLabel,
           data.servingSize,
           data.servingUnit
         );
-        foodMetaById.set(result.lastID, {
-          id: result.lastID,
+        foodMetaById.set(foodId, {
+          id: foodId,
           unit: data.servingUnit,
           servingSize: data.servingSize,
         });
-        return result.lastID;
+        return foodId;
       };
 
       for (const ingredient of ingredients) {
@@ -1716,25 +1630,22 @@ app.post(
         }
 
         const servings = parseNumber(recipe?.servings, 1);
-        const result = await foodDb.run(
-          `INSERT INTO "Recipes" ("user_id", "name", "servings", "notes")
-           VALUES (?, ?, ?, ?)`,
-          [
-            userId,
-            name,
-            servings > 0 ? Math.round(servings) : 1,
-            parseOptionalString(recipe?.notes),
-          ]
-        );
-        recipeIdMap.set(recipe?.id, result.lastID);
+        const recipeId = await foodDb.createRecipe({
+          userId,
+          name,
+          servings: servings > 0 ? Math.round(servings) : 1,
+          notes: parseOptionalString(recipe?.notes),
+        });
+        recipeIdMap.set(recipe?.id, recipeId);
         summary.recipes.created += 1;
 
         for (const item of mappedItems) {
-          await foodDb.run(
-            `INSERT INTO "FoodsInRecipes" ("recipe_id", "food_id", "quantity", "unit")
-             VALUES (?, ?, ?, ?)`,
-            [result.lastID, item.ingredientId, item.quantity, item.unit]
-          );
+          await foodDb.addFoodToRecipe({
+            recipeId,
+            foodId: item.ingredientId,
+            quantity: item.quantity,
+            unit: item.unit,
+          });
         }
       }
 
@@ -1795,20 +1706,16 @@ app.post(
           }
         }
 
-        await foodDb.run(
-          `INSERT INTO "UserIntakeLogs" ("user_id", "food_id", "recipe_id", "quantity", "unit", "logged_at_epoch", "intake_date", "notes")
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            userId,
-            mappedFoodId,
-            mappedRecipeId,
-            quantity,
-            unit,
-            Math.floor(consumedAt.getTime() / 1000),
-            intakeDate,
-            parseOptionalString(entry?.notes),
-          ]
-        );
+        await foodDb.logIntake({
+          userId,
+          foodId: mappedFoodId,
+          recipeId: mappedRecipeId,
+          quantity,
+          unit,
+          loggedAtEpoch: Math.floor(consumedAt.getTime() / 1000),
+          intakeDate,
+          notes: parseOptionalString(entry?.notes),
+        });
         summary.logs.created += 1;
       }
 
@@ -1838,33 +1745,35 @@ app.post(
             key;
           const allowOver = parseBoolean(target?.allowOver);
 
-          const existing = await foodDb.get(
-            `SELECT "id" FROM "UsersDailyValues" WHERE "user_id" = ? AND "nutrient_id" = ? LIMIT 1`,
-            [userId, nutrient.id]
-          );
+          const existing = await foodDb.getUserDailyValueByNutrient({
+            userId,
+            nutrientId: nutrient.id,
+          });
           if (existing) {
-            await foodDb.run(
-              `UPDATE "UsersDailyValues"
-                 SET "label" = ?, "target_value" = ?, "allow_exceed" = ?
-               WHERE "id" = ?`,
-              [label, targetValue ?? 0, allowOver ? 1 : 0, existing.id]
-            );
+            await foodDb.updateUserDailyValue({
+              id: existing.id,
+              label,
+              targetValue: targetValue ?? 0,
+              allowExceed: allowOver ? 1 : 0,
+            });
             summary.customTargets.updated += 1;
           } else {
-            await foodDb.run(
-              `INSERT INTO "UsersDailyValues" ("user_id", "nutrient_id", "label", "target_value", "allow_exceed")
-               VALUES (?, ?, ?, ?, ?)`,
-              [userId, nutrient.id, label, targetValue ?? 0, allowOver ? 1 : 0]
-            );
+            await foodDb.addUserDailyValue({
+              userId,
+              nutrientId: nutrient.id,
+              label,
+              targetValue: targetValue ?? 0,
+              allowExceed: allowOver ? 1 : 0,
+            });
             summary.customTargets.created += 1;
           }
         }
       }
 
       await ensureCoreTargets(userId);
-      await foodDb.run("COMMIT");
+      await foodDb.commitTransaction();
     } catch (error) {
-      await foodDb.run("ROLLBACK");
+      await foodDb.rollbackTransaction();
       throw error;
     }
 
@@ -2081,33 +1990,28 @@ app.post(
         .json({ error: "Ingredient name and unit are required." });
     }
 
-    const result = await foodDb.run(
-      `INSERT INTO "Foods" ("user_id", "name", "barcode", "ingredients_list", "allergens_list",
-        "serving_size", "serving_unit", "servings_per_container", "is_ingredient")
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        req.foodUserId,
-        data.name,
-        data.barcode,
-        data.ingredientsList,
-        data.allergensList,
-        data.servingSize,
-        data.servingUnit,
-        data.servingsPerContainer,
-        1,
-      ]
-    );
+    const ingredientId = await foodDb.createFood({
+      userId: req.foodUserId,
+      name: data.name,
+      barcode: data.barcode,
+      ingredientsList: data.ingredientsList,
+      allergensList: data.allergensList,
+      servingSize: data.servingSize,
+      servingUnit: data.servingUnit,
+      servingsPerContainer: data.servingsPerContainer,
+      isIngredient: 1,
+    });
     const nutrients = buildFoodNutrientValues(req.body);
-    await upsertFoodNutrients(result.lastID, nutrients);
+    await upsertFoodNutrients(ingredientId, nutrients);
     await saveDefaultAlternateUnit(
-      result.lastID,
+      ingredientId,
       data.servingLabel,
       data.servingSize,
       data.servingUnit
     );
     const model = buildFoodModel(
       {
-        id: result.lastID,
+        id: ingredientId,
         name: data.name,
         barcode: data.barcode,
         ingredients_list: data.ingredientsList,
@@ -2154,10 +2058,12 @@ app.put(
         .status(400)
         .json({ error: `${invalidField} must be a number.` });
     }
-    const existing = await foodDb.get(
-      `SELECT * FROM "Foods" WHERE "id" = ? AND "user_id" = ? AND "is_ingredient" = 1 AND "is_deleted" = 0`,
-      [ingredientId, req.foodUserId]
-    );
+    const existing = await foodDb.getFoodForUser({
+      foodId: ingredientId,
+      userId: req.foodUserId,
+      isIngredient: true,
+      includeDeleted: false,
+    });
     if (!existing) {
       return res.status(404).json({ error: "Ingredient not found." });
     }
@@ -2168,22 +2074,19 @@ app.put(
         .json({ error: "Ingredient name and unit are required." });
     }
 
-    await foodDb.run(
-      `UPDATE "Foods"
-         SET "name" = ?, "barcode" = ?, "ingredients_list" = ?, "allergens_list" = ?,
-             "serving_size" = ?, "serving_unit" = ?, "servings_per_container" = ?
-       WHERE "id" = ?`,
-      [
-        data.name,
-        data.barcode,
-        data.ingredientsList,
-        data.allergensList,
-        data.servingSize,
-        data.servingUnit,
-        data.servingsPerContainer,
-        ingredientId,
-      ]
-    );
+    await foodDb.updateFoodForUser({
+      foodId: ingredientId,
+      userId: req.foodUserId,
+      data: {
+        name: data.name,
+        barcode: data.barcode,
+        ingredients_list: data.ingredientsList,
+        allergens_list: data.allergensList,
+        serving_size: data.servingSize,
+        serving_unit: data.servingUnit,
+        servings_per_container: data.servingsPerContainer,
+      },
+    });
     const nutrients = buildFoodNutrientValues(req.body);
     await upsertFoodNutrients(ingredientId, nutrients);
     await saveDefaultAlternateUnit(
@@ -2219,10 +2122,11 @@ app.delete(
     if (!Number.isFinite(ingredientId)) {
       return res.status(400).json({ error: "Invalid ingredient id." });
     }
-    const result = await foodDb.run(
-      `UPDATE "Foods" SET "is_deleted" = 1 WHERE "id" = ? AND "user_id" = ? AND "is_ingredient" = 1 AND "is_deleted" = 0`,
-      [ingredientId, req.foodUserId]
-    );
+    const result = await foodDb.softDeleteFoodForUser({
+      foodId: ingredientId,
+      userId: req.foodUserId,
+      isIngredient: true,
+    });
     if (!result.changes) {
       return res.status(404).json({ error: "Ingredient not found." });
     }
@@ -2273,33 +2177,28 @@ app.post(
     if (!data) {
       return res.status(400).json({ error: "Food name and unit are required." });
     }
-    const result = await foodDb.run(
-      `INSERT INTO "Foods" ("user_id", "name", "barcode", "ingredients_list", "allergens_list",
-        "serving_size", "serving_unit", "servings_per_container", "is_ingredient")
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        req.foodUserId,
-        data.name,
-        data.barcode,
-        data.ingredientsList,
-        data.allergensList,
-        data.servingSize,
-        data.servingUnit,
-        data.servingsPerContainer,
-        0,
-      ]
-    );
+    const foodId = await foodDb.createFood({
+      userId: req.foodUserId,
+      name: data.name,
+      barcode: data.barcode,
+      ingredientsList: data.ingredientsList,
+      allergensList: data.allergensList,
+      servingSize: data.servingSize,
+      servingUnit: data.servingUnit,
+      servingsPerContainer: data.servingsPerContainer,
+      isIngredient: 0,
+    });
     const nutrients = buildFoodNutrientValues(req.body);
-    await upsertFoodNutrients(result.lastID, nutrients);
+    await upsertFoodNutrients(foodId, nutrients);
     await saveDefaultAlternateUnit(
-      result.lastID,
+      foodId,
       data.servingLabel,
       data.servingSize,
       data.servingUnit
     );
     const model = buildFoodModel(
       {
-        id: result.lastID,
+        id: foodId,
         name: data.name,
         barcode: data.barcode,
         ingredients_list: data.ingredientsList,
@@ -2346,10 +2245,12 @@ app.put(
         .status(400)
         .json({ error: `${invalidField} must be a number.` });
     }
-    const existing = await foodDb.get(
-      `SELECT * FROM "Foods" WHERE "id" = ? AND "user_id" = ? AND "is_ingredient" = 0 AND "is_deleted" = 0`,
-      [foodId, req.foodUserId]
-    );
+    const existing = await foodDb.getFoodForUser({
+      foodId,
+      userId: req.foodUserId,
+      isIngredient: false,
+      includeDeleted: false,
+    });
     if (!existing) {
       return res.status(404).json({ error: "Food not found." });
     }
@@ -2357,22 +2258,19 @@ app.put(
     if (!data) {
       return res.status(400).json({ error: "Food name and unit are required." });
     }
-    await foodDb.run(
-      `UPDATE "Foods"
-         SET "name" = ?, "barcode" = ?, "ingredients_list" = ?, "allergens_list" = ?,
-             "serving_size" = ?, "serving_unit" = ?, "servings_per_container" = ?
-       WHERE "id" = ?`,
-      [
-        data.name,
-        data.barcode,
-        data.ingredientsList,
-        data.allergensList,
-        data.servingSize,
-        data.servingUnit,
-        data.servingsPerContainer,
-        foodId,
-      ]
-    );
+    await foodDb.updateFoodForUser({
+      foodId,
+      userId: req.foodUserId,
+      data: {
+        name: data.name,
+        barcode: data.barcode,
+        ingredients_list: data.ingredientsList,
+        allergens_list: data.allergensList,
+        serving_size: data.servingSize,
+        serving_unit: data.servingUnit,
+        servings_per_container: data.servingsPerContainer,
+      },
+    });
     const nutrients = buildFoodNutrientValues(req.body);
     await upsertFoodNutrients(foodId, nutrients);
     await saveDefaultAlternateUnit(
@@ -2408,10 +2306,11 @@ app.delete(
     if (!Number.isFinite(foodId)) {
       return res.status(400).json({ error: "Invalid food id." });
     }
-    const result = await foodDb.run(
-      `UPDATE "Foods" SET "is_deleted" = 1 WHERE "id" = ? AND "user_id" = ? AND "is_ingredient" = 0 AND "is_deleted" = 0`,
-      [foodId, req.foodUserId]
-    );
+    const result = await foodDb.softDeleteFoodForUser({
+      foodId,
+      userId: req.foodUserId,
+      isIngredient: false,
+    });
     if (!result.changes) {
       return res.status(404).json({ error: "Food not found." });
     }
@@ -2460,30 +2359,26 @@ app.post(
       return res.status(400).json({ error });
     }
 
-    await foodDb.run("BEGIN");
+    await foodDb.beginTransaction();
     let recipeId;
     try {
-      const result = await foodDb.run(
-        `INSERT INTO "Recipes" ("user_id", "name", "servings", "notes")
-         VALUES (?, ?, ?, ?)`,
-        [
-          req.foodUserId,
-          name,
-          servings > 0 ? Math.round(servings) : 1,
-          notes,
-        ]
-      );
-      recipeId = result.lastID;
+      recipeId = await foodDb.createRecipe({
+        userId: req.foodUserId,
+        name,
+        servings: servings > 0 ? Math.round(servings) : 1,
+        notes,
+      });
       for (const item of payloadItems) {
-        await foodDb.run(
-          `INSERT INTO "FoodsInRecipes" ("recipe_id", "food_id", "quantity", "unit")
-           VALUES (?, ?, ?, ?)`,
-          [recipeId, item.foodId, item.quantity, item.unit]
-        );
+        await foodDb.addFoodToRecipe({
+          recipeId,
+          foodId: item.foodId,
+          quantity: item.quantity,
+          unit: item.unit,
+        });
       }
-      await foodDb.run("COMMIT");
+      await foodDb.commitTransaction();
     } catch (error) {
-      await foodDb.run("ROLLBACK");
+      await foodDb.rollbackTransaction();
       throw error;
     }
 
@@ -2534,38 +2429,35 @@ app.put(
       return res.status(400).json({ error });
     }
 
-    const existing = await foodDb.get(
-      `SELECT "id" FROM "Recipes" WHERE "id" = ? AND "user_id" = ? AND "is_deleted" = 0`,
-      [recipeId, req.foodUserId]
-    );
+    const existing = await foodDb.getRecipeForUser({
+      recipeId,
+      userId: req.foodUserId,
+      includeDeleted: false,
+    });
     if (!existing) {
       return res.status(404).json({ error: "Recipe not found." });
     }
 
-    await foodDb.run("BEGIN");
+    await foodDb.beginTransaction();
     try {
-      await foodDb.run(`DELETE FROM "FoodsInRecipes" WHERE "recipe_id" = ?`, [
+      await foodDb.deleteFoodsInRecipe(recipeId);
+      await foodDb.updateRecipe({
         recipeId,
-      ]);
-      await foodDb.run(
-        `UPDATE "Recipes" SET "name" = ?, "servings" = ?, "notes" = ? WHERE "id" = ?`,
-        [
-          name,
-          servings > 0 ? Math.round(servings) : 1,
-          notes,
-          recipeId,
-        ]
-      );
+        name,
+        servings: servings > 0 ? Math.round(servings) : 1,
+        notes,
+      });
       for (const item of payloadItems) {
-        await foodDb.run(
-          `INSERT INTO "FoodsInRecipes" ("recipe_id", "food_id", "quantity", "unit")
-           VALUES (?, ?, ?, ?)`,
-          [recipeId, item.foodId, item.quantity, item.unit]
-        );
+        await foodDb.addFoodToRecipe({
+          recipeId,
+          foodId: item.foodId,
+          quantity: item.quantity,
+          unit: item.unit,
+        });
       }
-      await foodDb.run("COMMIT");
+      await foodDb.commitTransaction();
     } catch (error) {
-      await foodDb.run("ROLLBACK");
+      await foodDb.rollbackTransaction();
       throw error;
     }
 
@@ -2586,10 +2478,10 @@ app.delete(
     if (!Number.isFinite(recipeId)) {
       return res.status(400).json({ error: "Invalid recipe id." });
     }
-    const result = await foodDb.run(
-      `UPDATE "Recipes" SET "is_deleted" = 1 WHERE "id" = ? AND "user_id" = ? AND "is_deleted" = 0`,
-      [recipeId, req.foodUserId]
-    );
+    const result = await foodDb.softDeleteRecipeForUser({
+      recipeId,
+      userId: req.foodUserId,
+    });
     if (!result.changes) {
       return res.status(404).json({ error: "Recipe not found." });
     }
@@ -2603,31 +2495,20 @@ app.get(
     const dateRange = parseDateRange(req.query.date);
     const limit = parsePositiveInt(req.query.limit);
     const offset = parsePositiveInt(req.query.offset);
-    const conditions = ['"user_id" = ?'];
-    const params = [req.foodUserId];
+    let startDate = null;
+    let endDate = null;
     if (dateRange) {
-      const start = toIntakeDate(dateRange.start);
-      const end = toIntakeDate(dateRange.end);
-      conditions.push('"intake_date" >= ? AND "intake_date" <= ?');
-      params.push(start, end);
+      startDate = toIntakeDate(dateRange.start);
+      endDate = toIntakeDate(dateRange.end);
     }
-    const whereClause = conditions.length
-      ? `WHERE ${conditions.join(" AND ")}`
-      : "";
-    let sql = `SELECT * FROM "UserIntakeLogs" ${whereClause} ORDER BY "logged_at_epoch" DESC`;
     const limitValue = limit !== null ? Math.min(limit, 500) : null;
-    if (limitValue !== null) {
-      sql += " LIMIT ?";
-      params.push(limitValue);
-    }
-    if (offset !== null) {
-      if (limitValue === null) {
-        sql += " LIMIT -1";
-      }
-      sql += " OFFSET ?";
-      params.push(offset);
-    }
-    const rows = await foodDb.all(sql, params);
+    const rows = await foodDb.listUserIntakeLogs({
+      userId: req.foodUserId,
+      startDate,
+      endDate,
+      limit: limitValue,
+      offset,
+    });
     const foodIds = Array.from(
       new Set(rows.map((row) => row.food_id).filter(Boolean))
     );
@@ -2658,6 +2539,7 @@ app.get(
         unit: row.unit,
         notes: row.notes ?? null,
         consumedAt: parseNumber(row.logged_at_epoch, 0) * 1000,
+        intakeDate: row.intake_date ?? null,
         ingredient: isIngredient ? food : null,
         food: !isIngredient ? food : null,
         recipe,
@@ -2699,21 +2581,23 @@ app.post(
     const allowOver = parseBoolean(req.body.allowOver);
 
     const nutrient = await ensureNutrient(key, catalog.unit, 0);
-    const existing = await foodDb.get(
-      `SELECT "id" FROM "UsersDailyValues" WHERE "user_id" = ? AND "nutrient_id" = ? LIMIT 1`,
-      [req.foodUserId, nutrient.id]
-    );
+    const existing = await foodDb.getUserDailyValueByNutrient({
+      userId: req.foodUserId,
+      nutrientId: nutrient.id,
+    });
     if (existing) {
       return res.status(409).json({ error: "Target already exists." });
     }
-    const result = await foodDb.run(
-      `INSERT INTO "UsersDailyValues" ("user_id", "nutrient_id", "label", "target_value", "allow_exceed")
-       VALUES (?, ?, ?, ?, ?)`,
-      [req.foodUserId, nutrient.id, label, target ?? 0, allowOver ? 1 : 0]
-    );
+    const createdId = await foodDb.addUserDailyValue({
+      userId: req.foodUserId,
+      nutrientId: nutrient.id,
+      label,
+      targetValue: target ?? 0,
+      allowExceed: allowOver ? 1 : 0,
+    });
 
     res.status(201).json({
-      id: result.lastID,
+      id: createdId,
       key,
       label,
       unit: nutrient.unit,
@@ -2731,14 +2615,10 @@ app.put(
       return res.status(400).json({ error: "Invalid target id." });
     }
 
-    const existing = await foodDb.get(
-      `SELECT udv.*, n.name, n.unit
-         FROM "UsersDailyValues" udv
-         JOIN "Nutrients" n ON n.id = udv.nutrient_id
-        WHERE udv.id = ? AND udv.user_id = ?
-        LIMIT 1`,
-      [targetId, req.foodUserId]
-    );
+    const existing = await foodDb.getUserDailyValueById({
+      id: targetId,
+      userId: req.foodUserId,
+    });
     if (!existing) {
       return res.status(404).json({ error: "Target not found." });
     }
@@ -2773,17 +2653,12 @@ app.put(
       return res.status(400).json({ error: "No updates provided." });
     }
 
-    const columns = [];
-    const values = [];
-    Object.entries(data).forEach(([key, value]) => {
-      columns.push(`"${key}" = ?`);
-      values.push(value);
+    await foodDb.updateUserDailyValue({
+      id: existing.id,
+      label: data.label,
+      targetValue: data.target_value,
+      allowExceed: data.allow_exceed,
     });
-    values.push(existing.id);
-    await foodDb.run(
-      `UPDATE "UsersDailyValues" SET ${columns.join(", ")} WHERE "id" = ?`,
-      values
-    );
 
     const updatedLabel =
       data.label ??
@@ -2815,10 +2690,10 @@ app.delete(
     if (!Number.isFinite(targetId)) {
       return res.status(400).json({ error: "Invalid target id." });
     }
-    const result = await foodDb.run(
-      `DELETE FROM "UsersDailyValues" WHERE "id" = ? AND "user_id" = ?`,
-      [targetId, req.foodUserId]
-    );
+    const result = await foodDb.deleteUserDailyValue({
+      id: targetId,
+      userId: req.foodUserId,
+    });
     if (!result.changes) {
       return res.status(404).json({ error: "Target not found." });
     }
@@ -2920,25 +2795,21 @@ app.post(
     }
 
     const consumedAt = parseDate(req.body.consumedAt);
-    const intakeDate = parseIntakeDate(req.body.intakeDate) ?? toIntakeDate(consumedAt);
-    const entryResult = await foodDb.run(
-      `INSERT INTO "UserIntakeLogs" ("user_id", "food_id", "recipe_id", "quantity", "unit",
-        "logged_at_epoch", "intake_date", "notes")
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        req.foodUserId,
-        ingredientId || foodId,
-        recipeId,
-        quantity,
-        unit,
-        Math.floor(consumedAt.getTime() / 1000),
-        intakeDate,
-        req.body.notes ? String(req.body.notes).trim() : null,
-      ]
-    );
+    const intakeDate =
+      parseIntakeDate(req.body.intakeDate) ?? toIntakeDate(consumedAt);
+    const logId = await foodDb.logIntake({
+      userId: req.foodUserId,
+      foodId: ingredientId || foodId,
+      recipeId,
+      quantity,
+      unit,
+      loggedAtEpoch: Math.floor(consumedAt.getTime() / 1000),
+      intakeDate,
+      notes: req.body.notes ? String(req.body.notes).trim() : null,
+    });
 
     const entry = {
-      id: entryResult.lastID,
+      id: logId,
       ingredientId: ingredientId || null,
       foodId: foodId || null,
       recipeId: recipeId || null,
@@ -2946,6 +2817,7 @@ app.post(
       unit,
       notes: req.body.notes ? String(req.body.notes).trim() : null,
       consumedAt: consumedAt.getTime(),
+      intakeDate,
       ingredient,
       food,
       recipe,
@@ -2962,10 +2834,10 @@ app.delete(
     if (!Number.isFinite(entryId)) {
       return res.status(400).json({ error: "Invalid log id." });
     }
-    const result = await foodDb.run(
-      `DELETE FROM "UserIntakeLogs" WHERE "id" = ? AND "user_id" = ?`,
-      [entryId, req.foodUserId]
-    );
+    const result = await foodDb.deleteUserIntakeLog({
+      logId: entryId,
+      userId: req.foodUserId,
+    });
     if (!result.changes) {
       return res.status(404).json({ error: "Log entry not found." });
     }

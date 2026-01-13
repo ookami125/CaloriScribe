@@ -577,6 +577,33 @@ const toDateInputValue = (date) => {
   return `${year}-${month}-${day}`;
 };
 
+const getEntryDayValue = (entry) => {
+  if (entry?.intakeDate) {
+    return entry.intakeDate;
+  }
+  const consumed = new Date(entry?.consumedAt || 0);
+  if (Number.isNaN(consumed.getTime())) {
+    return "";
+  }
+  return toDateInputValue(consumed);
+};
+
+const formatEntryTimestamp = (entry) => {
+  const consumed = new Date(entry?.consumedAt || 0);
+  if (Number.isNaN(consumed.getTime())) {
+    return "";
+  }
+  const day = entry?.intakeDate
+    ? new Date(`${entry.intakeDate}T00:00:00`)
+    : consumed;
+  const dateLabel = day.toLocaleDateString();
+  const timeLabel = consumed.toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  return `${dateLabel} · ${timeLabel}`;
+};
+
 const toLocalDateTimeValue = (date) => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -1902,17 +1929,20 @@ const renderLogList = () => {
     return;
   }
   elements.logList.innerHTML = "";
-  const selectedDate = getSelectedDate();
-  const filteredLogs = selectedDate
-    ? state.logs.filter((entry) =>
-        isSameDay(new Date(entry.consumedAt), selectedDate)
+  const selectedDayValue = getSelectedDayValue();
+  const filteredLogs = selectedDayValue
+    ? state.logs.filter(
+        (entry) => getEntryDayValue(entry) === selectedDayValue
       )
     : state.logs;
+  const sortedLogs = [...filteredLogs].sort(
+    (a, b) => parseNumeric(b.consumedAt, 0) - parseNumeric(a.consumedAt, 0)
+  );
 
-  if (!filteredLogs.length) {
+  if (!sortedLogs.length) {
     const empty = document.createElement("div");
     empty.className = "list-card";
-    empty.textContent = selectedDate
+    empty.textContent = selectedDayValue
       ? "No logs for this day."
       : "No logs yet.";
     elements.logList.appendChild(empty);
@@ -1920,7 +1950,7 @@ const renderLogList = () => {
   }
 
   const limit = Number(elements.logList.dataset.limit || 0);
-  const entries = limit ? filteredLogs.slice(0, limit) : filteredLogs;
+  const entries = limit ? sortedLogs.slice(0, limit) : sortedLogs;
 
   entries.forEach((entry) => {
     const card = document.createElement("div");
@@ -1931,9 +1961,9 @@ const renderLogList = () => {
 
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.textContent = `${formatNumber(entry.quantity)} ${entry.unit} · ${new Date(
-      entry.consumedAt
-    ).toLocaleString()}`;
+    meta.textContent = `${formatNumber(entry.quantity)} ${entry.unit} · ${formatEntryTimestamp(
+      entry
+    )}`;
 
     const macrosSummary = document.createElement("span");
     macrosSummary.className = "meta details-summary-text";
@@ -2028,11 +2058,10 @@ const renderLogList = () => {
 };
 
 const getSelectedDayTotals = () => {
-  const targetDate = getSelectedDate() || new Date();
+  const targetValue = getSelectedDayValue() || toDateInputValue(new Date());
   return state.logs.reduce(
     (acc, entry) => {
-      const consumed = new Date(entry.consumedAt);
-      if (!isSameDay(consumed, targetDate)) {
+      if (getEntryDayValue(entry) !== targetValue) {
         return acc;
       }
       acc.calories += entry.nutrition.calories;
@@ -2163,10 +2192,9 @@ const getSelectedDayNutrientTotals = (keys) => {
   if (!keys.length) {
     return totals;
   }
-  const targetDate = getSelectedDate() || new Date();
+  const targetValue = getSelectedDayValue() || toDateInputValue(new Date());
   state.logs.forEach((entry) => {
-    const consumed = new Date(entry.consumedAt);
-    if (!isSameDay(consumed, targetDate)) {
+    if (getEntryDayValue(entry) !== targetValue) {
       return;
     }
     keys.forEach((key) => {
