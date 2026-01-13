@@ -20,11 +20,7 @@ A full-stack nutrition tracker that stores ingredients, builds recipes, and logs
    ```bash
    cp .env.example .env
    ```
-3. Initialize the database:
-   ```bash
-   npx prisma migrate dev --name init
-   ```
-4. Start the server:
+3. Start the server (databases are initialized automatically):
    ```bash
    npm run dev
    ```
@@ -48,12 +44,11 @@ Mobile browsers require HTTPS for camera access when using an IP address. Genera
    - `https://localhost:3000`
    - `https://192.168.1.8:3000` (accept the browser warning)
 
-## Switching databases
-This app uses Prisma, so you can swap SQLite for PostgreSQL, MySQL, or other supported providers.
+## Databases
+The app uses SQLite files for both the nutrition data and auth data.
 
-1. Update `prisma/schema.prisma` with the new provider.
-2. Update `DATABASE_URL` in `.env`.
-3. Run `npx prisma migrate dev` again.
+- `DATABASE_URL` points to the nutrition database file.
+- `AUTH_DATABASE_URL` points to the auth database file.
 
 ## Notes
 - Barcode scanning requires a secure context (`https` or `http://localhost`).
@@ -66,8 +61,6 @@ Create users manually and sign in at `/login`.
 npm run create:user -- username password
 npm run password:user -- username newpassword
 ```
-
-If you already have data, the auth migration requires assigning `userId` values. For a clean start, reset the SQLite database and re-run migrations.
 
 ## Import/export
 Use the dashboard buttons to export a JSON file or import one back in. Imports default to merge (existing ingredients match on barcode or name).

@@ -8,8 +8,9 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: "file:/app/data/dev.db"
+      DATABASE_URL: "file:/app/data/nutrition.db"
+      AUTH_DATABASE_URL: "file:/app/data/auth.db"
     volumes:
-      - ./prisma:/app/data
+      - ./data:/app/data
       - ./certs:/app/certs
     restart: unless-stopped

@@ -14,6 +14,11 @@ prisma/*.db-journal
 !prisma/migrations/
 !prisma/migrations/**
 
+# Local databases
+*.db
+*.db-journal
+data/
+
 # Build output
 dist/
 build/

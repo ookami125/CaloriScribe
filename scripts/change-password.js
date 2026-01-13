@@ -3,8 +3,8 @@
 
 const fs = require("fs");
 const path = require("path");
-const { PrismaClient } = require("@prisma/client");
 const { hashPassword } = require("../lib/auth");
+const { AuthDatabase } = require("../lib/auth-db");
 
 const loadEnvFile = () => {
   const envPath = path.join(process.cwd(), ".env");
@@ -34,10 +34,24 @@ const showUsage = () => {
   console.log("Usage: node scripts/change-password.js <username> <password>");
 };
 
+const resolveSqlitePath = (url, fallbackPath) => {
+  if (!url) {
+    return fallbackPath;
+  }
+  if (!url.startsWith("file:")) {
+    return fallbackPath;
+  }
+  const rawPath = url.slice("file:".length).split("?")[0];
+  if (!rawPath) {
+    return fallbackPath;
+  }
+  return path.isAbsolute(rawPath) ? rawPath : path.resolve(process.cwd(), rawPath);
+};
+
 const main = async () => {
   loadEnvFile();
-  if (!process.env.DATABASE_URL) {
-    process.env.DATABASE_URL = "file:./dev.db";
+  if (!process.env.AUTH_DATABASE_URL) {
+    process.env.AUTH_DATABASE_URL = "file:./auth.db";
   }
   const args = process.argv.slice(2);
   const username = String(args[0] || "").trim().toLowerCase();
@@ -47,21 +61,22 @@ const main = async () => {
     process.exit(1);
   }
 
-  const prisma = new PrismaClient();
+  const authDb = new AuthDatabase({
+    filename: resolveSqlitePath(process.env.AUTH_DATABASE_URL, "auth.db"),
+  });
   try {
-    const existing = await prisma.user.findUnique({ where: { username } });
+    await authDb.open();
+    await authDb.initSchema();
+    const existing = await authDb.getUserByUsername(username);
     if (!existing) {
       console.error("User not found.");
       process.exit(1);
     }
     const passwordHash = await hashPassword(password);
-    await prisma.user.update({
-      where: { username },
-      data: { passwordHash },
-    });
+    await authDb.updatePassword({ userId: existing.id, passwordHash });
     console.log(`Updated password for ${username}.`);
   } finally {
-    await prisma.$disconnect();
+    await authDb.close();
   }
 };
 

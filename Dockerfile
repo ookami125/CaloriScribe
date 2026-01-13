@@ -2,16 +2,15 @@ FROM node:20-bookworm-slim
 
 WORKDIR /app
 ENV DATABASE_URL="file:./data/nutrition.db"
+ENV AUTH_DATABASE_URL="file:./data/auth.db"
 
 COPY package.json package-lock.json ./
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && apt-get install -y --no-install-recommends ca-certificates openssl python3 make g++ \
   && rm -rf /var/lib/apt/lists/* \
   && npm ci
 
-COPY prisma ./prisma
-RUN npx prisma generate
-
+COPY external ./external
 COPY lib ./lib
 COPY public ./public
 COPY views ./views
@@ -25,4 +24,4 @@ EXPOSE 3000
 
 ENV NODE_ENV=production
 
-CMD ["sh", "-c", "npx prisma migrate deploy && node server.js"]
+CMD ["node", "server.js"]

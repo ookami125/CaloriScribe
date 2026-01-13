@@ -4,7 +4,8 @@ const https = require("https");
 const crypto = require("crypto");
 const path = require("path");
 const express = require("express");
-const { PrismaClient } = require("@prisma/client");
+const { FoodDatabase } = require("./external/FoodDatabase/src/foodDatabase");
+const { AuthDatabase } = require("./lib/auth-db");
 const { hashPassword, verifyPassword } = require("./lib/auth");
 const {
   parseServingLabel,
@@ -16,8 +17,10 @@ const {
 if (!process.env.DATABASE_URL) {
   process.env.DATABASE_URL = "file:./dev.db";
 }
+if (!process.env.AUTH_DATABASE_URL) {
+  process.env.AUTH_DATABASE_URL = "file:./auth.db";
+}
 
-const prisma = new PrismaClient();
 const app = express();
 const PORT = process.env.PORT || 3000;
 const APP_NAME = "CaloriScribe";
@@ -46,6 +49,27 @@ const TARGET_CATALOG = {
 };
 const CORE_TARGET_KEYS = Object.keys(CORE_TARGET_CATALOG);
 const CUSTOM_TARGET_KEYS = Object.keys(CUSTOM_TARGET_CATALOG);
+const NUTRIENT_KEYS = Object.keys(TARGET_CATALOG);
+
+const resolveSqlitePath = (url, fallbackPath) => {
+  if (!url || !url.startsWith("file:")) {
+    return fallbackPath;
+  }
+  const rawPath = url.slice("file:".length).split("?")[0];
+  if (!rawPath) {
+    return fallbackPath;
+  }
+  return path.isAbsolute(rawPath)
+    ? rawPath
+    : path.resolve(process.cwd(), rawPath);
+};
+
+const foodDb = new FoodDatabase({
+  filename: resolveSqlitePath(process.env.DATABASE_URL, "dev.db"),
+});
+const authDb = new AuthDatabase({
+  filename: resolveSqlitePath(process.env.AUTH_DATABASE_URL, "auth.db"),
+});
 
 app.set("view engine", "ejs");
 app.set("views", path.join(__dirname, "views"));
@@ -56,22 +80,53 @@ app.set("trust proxy", 1);
 const asyncHandler = (handler) => (req, res, next) =>
   Promise.resolve(handler(req, res, next)).catch(next);
 
+const getFoodUserByExternalId = async (externalId) =>
+  foodDb.get('SELECT * FROM "Users" WHERE "external_id" = ? LIMIT 1', [
+    externalId,
+  ]);
+
+const ensureFoodUser = async (authUser) => {
+  if (!authUser?.external_id) {
+    return null;
+  }
+  const existing = await getFoodUserByExternalId(authUser.external_id);
+  if (existing) {
+    return existing;
+  }
+  const created = await foodDb.createUser({ externalId: authUser.external_id });
+  return { id: created.id, external_id: created.externalId };
+};
+
 const attachUser = asyncHandler(async (req, res, next) => {
   const token = getSessionToken(req);
   if (!token) {
     return next();
   }
-  const session = await prisma.session.findFirst({
-    where: {
-      token,
-      expiresAt: { gt: new Date() },
-    },
-    include: { user: true },
-  });
-  if (session) {
-    req.user = session.user;
-    req.session = session;
+  const session = await authDb.getSessionByToken(token);
+  if (!session) {
+    return next();
   }
+  const expiresAt = new Date(session.expires_at);
+  if (Number.isNaN(expiresAt.getTime()) || expiresAt <= new Date()) {
+    await authDb.deleteSession(token);
+    return next();
+  }
+  const user = await authDb.getUserById(session.user_id);
+  if (!user) {
+    return next();
+  }
+  const foodUser = await ensureFoodUser(user);
+  if (!foodUser) {
+    return next();
+  }
+  req.user = {
+    id: user.id,
+    username: user.username,
+    externalId: user.external_id,
+    createdAt: user.created_at,
+  };
+  req.session = session;
+  req.foodUserId = foodUser.id;
   return next();
 });
 
@@ -160,31 +215,127 @@ const parsePositiveInt = (value, fallback = null) => {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 };
 
-const isCoreTargetKey = (key) => CORE_TARGET_KEYS.includes(key);
-
-const ensureCoreTargets = async (userId, tx = prisma) => {
-  const existingCount = await tx.customTarget.count({ where: { userId } });
-  if (existingCount) {
-    return;
+const formatServingSizeLabel = (size, unit) => {
+  if (!size || !unit) {
+    return "";
   }
-  await tx.customTarget.createMany({
-    data: CORE_TARGET_KEYS.map((key) => ({
-      key,
-      label: CORE_TARGET_CATALOG[key].label,
-      unit: CORE_TARGET_CATALOG[key].unit,
-      target: null,
-      allowOver: false,
-      userId,
-    })),
-  });
+  return `${size} ${unit}`.trim();
 };
 
-const getCustomTargetsForUser = async (userId, tx = prisma) => {
-  await ensureCoreTargets(userId, tx);
-  return tx.customTarget.findMany({
-    where: { userId },
-    orderBy: { label: "asc" },
+const parseServingSizeInput = (value, unit) => {
+  const parsed = parseServingLabel(value);
+  const baseUnit = unit || parsed?.unit || "";
+  let size = 1;
+  if (parsed && baseUnit) {
+    const multiplier = getUnitMultiplier(parsed.unit, baseUnit);
+    if (multiplier !== null && Number.isFinite(multiplier)) {
+      size = parsed.amount * multiplier;
+    }
+  }
+  if (!Number.isFinite(size) || size <= 0) {
+    size = 1;
+  }
+  return { servingSize: size, servingUnit: baseUnit };
+};
+
+const parseServingsPerContainer = (value) => {
+  const parsed = parseNumber(value, 0);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+};
+
+const isCoreTargetKey = (key) => CORE_TARGET_KEYS.includes(key);
+
+let nutrientLookupCache = null;
+
+const loadNutrientLookup = async () => {
+  if (nutrientLookupCache) {
+    return nutrientLookupCache;
+  }
+  const rows = await foodDb.all(
+    `SELECT "id", "name", "unit", "daily_value" FROM "Nutrients"`
+  );
+  nutrientLookupCache = new Map(rows.map((row) => [row.name, row]));
+  return nutrientLookupCache;
+};
+
+const ensureNutrients = async () => {
+  const existing = await foodDb.all(
+    `SELECT "id", "name" FROM "Nutrients"`
+  );
+  const existingNames = new Set(existing.map((row) => row.name));
+  const inserts = [];
+  Object.entries(TARGET_CATALOG).forEach(([key, value]) => {
+    if (!existingNames.has(key)) {
+      inserts.push({ name: key, unit: value.unit, dailyValue: 0 });
+    }
   });
+  if (!inserts.length) {
+    return;
+  }
+  for (const item of inserts) {
+    await foodDb.run(
+      `INSERT INTO "Nutrients" ("name", "unit", "daily_value") VALUES (?, ?, ?)`,
+      [item.name, item.unit, item.dailyValue]
+    );
+  }
+  nutrientLookupCache = null;
+};
+
+const ensureNutrient = async (key, unit = "g", dailyValue = 0) => {
+  const lookup = await loadNutrientLookup();
+  const existing = lookup.get(key);
+  if (existing) {
+    return existing;
+  }
+  await foodDb.run(
+    `INSERT INTO "Nutrients" ("name", "unit", "daily_value") VALUES (?, ?, ?)`,
+    [key, unit, dailyValue]
+  );
+  nutrientLookupCache = null;
+  return (await loadNutrientLookup()).get(key);
+};
+
+const ensureCoreTargets = async (userId) => {
+  const existing = await foodDb.get(
+    `SELECT 1 FROM "UsersDailyValues" WHERE "user_id" = ? LIMIT 1`,
+    [userId]
+  );
+  if (existing) {
+    return;
+  }
+  await ensureNutrients();
+  const lookup = await loadNutrientLookup();
+  for (const key of CORE_TARGET_KEYS) {
+    const nutrient = lookup.get(key);
+    if (!nutrient) {
+      continue;
+    }
+    await foodDb.run(
+      `INSERT INTO "UsersDailyValues" ("user_id", "nutrient_id", "label", "target_value", "allow_exceed")
+       VALUES (?, ?, ?, ?, ?)`,
+      [userId, nutrient.id, TARGET_CATALOG[key].label, 0, 0]
+    );
+  }
+};
+
+const getCustomTargetsForUser = async (userId) => {
+  await ensureCoreTargets(userId);
+  const rows = await foodDb.all(
+    `SELECT udv.*, n.name, n.unit
+       FROM "UsersDailyValues" udv
+       JOIN "Nutrients" n ON n.id = udv.nutrient_id
+      WHERE udv.user_id = ?
+      ORDER BY COALESCE(udv.label, n.name) ASC`,
+    [userId]
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    key: row.name,
+    label: row.label || TARGET_CATALOG[row.name]?.label || row.name,
+    unit: row.unit,
+    target: row.target_value > 0 ? row.target_value : null,
+    allowOver: Boolean(row.allow_exceed),
+  }));
 };
 
 const buildTargetsPayload = (targets) => {
@@ -202,41 +353,281 @@ const buildTargetsPayload = (targets) => {
   };
 };
 
-const buildIngredientPayload = (ingredient, userId) => {
-  const name = String(ingredient?.name || "").trim();
-  const unit = String(ingredient?.unit || "").trim();
-  if (!name || !unit) {
-    return null;
-  }
+const buildFoodModel = (row, nutrientValues) => {
+  const nutrients = nutrientValues || {};
+  const read = (key) => parseNumber(nutrients[key], 0);
   return {
-    name,
-    barcode: parseOptionalString(ingredient?.barcode),
-    calories: parseNumber(ingredient?.calories),
-    protein: parseNumber(ingredient?.protein),
-    carbs: parseNumber(ingredient?.carbs),
-    fat: parseNumber(ingredient?.fat),
-    unit,
-    servingSize: parseOptionalString(ingredient?.servingSize),
-    servingsPerContainer: parseOptionalString(ingredient?.servingsPerContainer),
-    saturatedFat: parseOptionalNumber(ingredient?.saturatedFat),
-    transFat: parseOptionalNumber(ingredient?.transFat),
-    cholesterolMg: parseOptionalNumber(ingredient?.cholesterolMg),
-    sodiumMg: parseOptionalNumber(ingredient?.sodiumMg),
-    dietaryFiber: parseOptionalNumber(ingredient?.dietaryFiber),
-    totalSugars: parseOptionalNumber(ingredient?.totalSugars),
-    addedSugars: parseOptionalNumber(ingredient?.addedSugars),
-    vitaminDMcg: parseOptionalNumber(ingredient?.vitaminDMcg),
-    calciumMg: parseOptionalNumber(ingredient?.calciumMg),
-    ironMg: parseOptionalNumber(ingredient?.ironMg),
-    potassiumMg: parseOptionalNumber(ingredient?.potassiumMg),
-    ingredientsList: parseOptionalString(ingredient?.ingredientsList),
-    vitamins: parseOptionalString(ingredient?.vitamins),
-    allergens: parseOptionalString(ingredient?.allergens),
-    userId,
+    id: row.id,
+    name: row.name,
+    barcode: row.barcode,
+    unit: row.serving_unit,
+    servingSize: parseNumber(row.serving_size, 1),
+    servingsPerContainer: parseNumber(row.servings_per_container, 1),
+    servingLabel: row.serving_label ?? null,
+    ingredientsList: row.ingredients_list ?? null,
+    allergens: row.allergens_list ?? null,
+    isIngredient: Boolean(row.is_ingredient),
+    isDeleted: Boolean(row.is_deleted),
+    calories: read("calories"),
+    protein: read("protein"),
+    carbs: read("carbs"),
+    fat: read("fat"),
+    saturatedFat: read("saturatedFat"),
+    transFat: read("transFat"),
+    cholesterolMg: read("cholesterolMg"),
+    sodiumMg: read("sodiumMg"),
+    dietaryFiber: read("dietaryFiber"),
+    totalSugars: read("totalSugars"),
+    addedSugars: read("addedSugars"),
+    vitaminDMcg: read("vitaminDMcg"),
+    calciumMg: read("calciumMg"),
+    ironMg: read("ironMg"),
+    potassiumMg: read("potassiumMg"),
   };
 };
 
-const buildFoodPayload = (food, userId) => buildIngredientPayload(food, userId);
+const serializeFood = (food) => {
+  const { servingLabel, ...rest } = food;
+  return {
+    ...rest,
+    servingSize:
+      servingLabel || formatServingSizeLabel(food.servingSize, food.unit),
+    servingsPerContainer:
+      food.servingsPerContainer !== null && food.servingsPerContainer !== undefined
+        ? String(food.servingsPerContainer)
+        : "",
+  };
+};
+
+const fetchFoods = async ({
+  userId,
+  isIngredient = null,
+  ids = [],
+  barcode,
+  search,
+  includeDeleted = false,
+} = {}) => {
+  const conditions = ['f.user_id = ?'];
+  const params = [userId];
+  if (!includeDeleted) {
+    conditions.push("f.is_deleted = 0");
+  }
+  if (isIngredient !== null) {
+    conditions.push("f.is_ingredient = ?");
+    params.push(isIngredient ? 1 : 0);
+  }
+  if (ids.length) {
+    conditions.push(`f.id IN (${ids.map(() => "?").join(",")})`);
+    params.push(...ids);
+  }
+  if (barcode) {
+    conditions.push("f.barcode = ?");
+    params.push(String(barcode));
+  }
+  if (search) {
+    conditions.push("LOWER(f.name) LIKE ?");
+    params.push(`%${String(search).toLowerCase()}%`);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = await foodDb.all(
+    `SELECT f.*, fau.label AS serving_label,
+            n.name AS nutrient_name, nif.amount AS nutrient_amount
+       FROM "Foods" f
+       LEFT JOIN "FoodAlternateUnits" fau
+         ON fau.food_id = f.id AND fau.is_default = 1
+       LEFT JOIN "NutrientsInFoods" nif ON nif.food_id = f.id
+       LEFT JOIN "Nutrients" n ON n.id = nif.nutrient_id
+       ${where}
+      ORDER BY f.name ASC`,
+    params
+  );
+
+  const foodRows = new Map();
+  const nutrientMap = new Map();
+  rows.forEach((row) => {
+    if (!foodRows.has(row.id)) {
+      foodRows.set(row.id, row);
+    }
+    if (row.nutrient_name) {
+      const entry = nutrientMap.get(row.id) || {};
+      entry[row.nutrient_name] = row.nutrient_amount;
+      nutrientMap.set(row.id, entry);
+    }
+  });
+
+  const foods = Array.from(foodRows.values()).map((row) =>
+    buildFoodModel(row, nutrientMap.get(row.id))
+  );
+  return { foods, byId: new Map(foods.map((food) => [food.id, food])) };
+};
+
+const fetchRecipes = async ({ userId, ids = [], includeDeleted = false } = {}) => {
+  const conditions = ['r.user_id = ?'];
+  const params = [userId];
+  if (!includeDeleted) {
+    conditions.push("r.is_deleted = 0");
+  }
+  if (ids.length) {
+    conditions.push(`r.id IN (${ids.map(() => "?").join(",")})`);
+    params.push(...ids);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const recipeRows = await foodDb.all(
+    `SELECT r.* FROM "Recipes" r ${where} ORDER BY r.name ASC`,
+    params
+  );
+  if (!recipeRows.length) {
+    return { recipes: [], byId: new Map() };
+  }
+  const recipeIds = recipeRows.map((row) => row.id);
+  const itemRows = await foodDb.all(
+    `SELECT * FROM "FoodsInRecipes" WHERE "recipe_id" IN (${recipeIds
+      .map(() => "?")
+      .join(",")})`,
+    recipeIds
+  );
+  const foodIds = Array.from(new Set(itemRows.map((row) => row.food_id)));
+  const { byId: foodById } = await fetchFoods({
+    userId,
+    ids: foodIds,
+    includeDeleted: true,
+  });
+
+  const itemsByRecipe = new Map();
+  itemRows.forEach((row) => {
+    const list = itemsByRecipe.get(row.recipe_id) || [];
+    const ingredient = foodById.get(row.food_id);
+    if (ingredient) {
+      list.push({
+        ingredient,
+        quantity: row.quantity,
+        unit: row.unit,
+        ingredientId: row.food_id,
+      });
+    }
+    itemsByRecipe.set(row.recipe_id, list);
+  });
+
+  const recipes = recipeRows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    notes: row.notes,
+    servings: row.servings,
+    items: itemsByRecipe.get(row.id) || [],
+  }));
+  return { recipes, byId: new Map(recipes.map((recipe) => [recipe.id, recipe])) };
+};
+
+const fetchLogsForExport = async (userId) => {
+  const rows = await foodDb.all(
+    `SELECT * FROM "UserIntakeLogs" WHERE "user_id" = ? ORDER BY "logged_at_epoch" DESC`,
+    [userId]
+  );
+  if (!rows.length) {
+    return [];
+  }
+  const foodIds = rows
+    .filter((row) => row.food_id)
+    .map((row) => row.food_id);
+  const { byId: foodById } = await fetchFoods({
+    userId,
+    ids: Array.from(new Set(foodIds)),
+    includeDeleted: true,
+  });
+
+  return rows.map((row) => {
+    const food = row.food_id ? foodById.get(row.food_id) : null;
+    const isIngredient = food?.isIngredient;
+    return {
+      id: row.id,
+      ingredientId: isIngredient ? row.food_id : null,
+      foodId: !isIngredient ? row.food_id : null,
+      recipeId: row.recipe_id,
+      quantity: row.quantity,
+      unit: row.unit,
+      notes: row.notes ?? null,
+      consumedAt: row.logged_at_epoch * 1000,
+    };
+  });
+};
+
+const upsertFoodNutrients = async (foodId, nutrientValues) => {
+  await ensureNutrients();
+  const lookup = await loadNutrientLookup();
+  for (const [key, value] of Object.entries(nutrientValues)) {
+    const nutrient = lookup.get(key);
+    if (!nutrient) {
+      continue;
+    }
+    await foodDb.run(
+      `INSERT OR REPLACE INTO "NutrientsInFoods" ("food_id", "nutrient_id", "amount")
+       VALUES (?, ?, ?)`,
+      [foodId, nutrient.id, parseNumber(value, 0)]
+    );
+  }
+};
+
+const buildFoodPayload = (payload, isIngredient) => {
+  const name = String(payload?.name || "").trim();
+  const unit = String(payload?.unit || "").trim();
+  if (!name || !unit) {
+    return null;
+  }
+  const servingInput = parseServingSizeInput(payload?.servingSize, unit);
+  const servingLabel = String(payload?.servingSize || "").trim();
+  return {
+    name,
+    barcode: parseOptionalString(payload?.barcode),
+    ingredientsList: parseOptionalString(payload?.ingredientsList),
+    allergensList: parseOptionalString(payload?.allergens),
+    servingSize: servingInput.servingSize,
+    servingUnit: servingInput.servingUnit || unit,
+    servingsPerContainer: parseServingsPerContainer(payload?.servingsPerContainer),
+    isIngredient: isIngredient ? 1 : 0,
+    servingLabel,
+  };
+};
+
+const buildFoodNutrientValues = (payload) => {
+  const values = {};
+  NUTRIENT_KEYS.forEach((key) => {
+    values[key] = parseNumber(payload?.[key], 0);
+  });
+  return values;
+};
+
+const saveDefaultAlternateUnit = async (
+  foodId,
+  label,
+  servingSize,
+  servingUnit
+) => {
+  const fallbackLabel = formatServingSizeLabel(servingSize, servingUnit);
+  const normalizedLabel = String(label || "").trim() || fallbackLabel;
+  if (!normalizedLabel) {
+    return;
+  }
+  const safeQuantity =
+    Number.isFinite(servingSize) && servingSize > 0 ? servingSize : 1;
+  const safeUnit = servingUnit || "serving";
+
+  await foodDb.run(
+    `DELETE FROM "FoodAlternateUnits" WHERE "food_id" = ? AND "is_default" = 1`,
+    [foodId]
+  );
+  await foodDb.run(
+    `INSERT INTO "FoodAlternateUnits" ("food_id", "label", "quantity", "unit", "base_serving_multiplier", "is_default")
+     VALUES (?, ?, ?, ?, ?, 1)`,
+    [foodId, normalizedLabel, safeQuantity, safeUnit, 1]
+  );
+};
+
+const toIntakeDate = (date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
 
 const TARGET_LANGUAGE = (process.env.TARGET_LANGUAGE || "en").toLowerCase();
 const REQUEST_TIMEOUT_MS = Number.parseInt(
@@ -769,7 +1160,10 @@ const normalizeIngredientQuantity = (ingredient, quantity, unit) => {
       error: `Unit ${entryUnit} is not compatible with ${ingredientUnit}.`,
     };
   }
-  return { quantity: quantity * multiplier, unit: ingredientUnit };
+  const converted = quantity * multiplier;
+  const servingSize = parseNumber(ingredient.servingSize, 1);
+  const servings = servingSize > 0 ? converted / servingSize : converted;
+  return { quantity: servings, unit: ingredientUnit };
 };
 
 const normalizeRecipeQuantity = (quantity, unit) => {
@@ -897,23 +1291,18 @@ app.post(
         .status(400)
         .json({ error: "Username and password are required." });
     }
-    const user = await prisma.user.findUnique({ where: { username } });
+    const user = await authDb.getUserByUsername(username);
     if (!user) {
       return res.status(401).json({ error: "Invalid credentials." });
     }
-    const isValid = await verifyPassword(password, user.passwordHash);
+    const isValid = await verifyPassword(password, user.password_hash);
     if (!isValid) {
       return res.status(401).json({ error: "Invalid credentials." });
     }
     const token = crypto.randomBytes(32).toString("hex");
-    const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
-    await prisma.session.create({
-      data: {
-        token,
-        expiresAt,
-        userId: user.id,
-      },
-    });
+    const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+    await authDb.createSession({ userId: user.id, token, expiresAt });
+    await ensureFoodUser(user);
     const secure = req.secure || process.env.HTTPS === "true";
     res.setHeader(
       "Set-Cookie",
@@ -931,7 +1320,7 @@ app.post(
   asyncHandler(async (req, res) => {
     const token = getSessionToken(req);
     if (token) {
-      await prisma.session.deleteMany({ where: { token } });
+      await authDb.deleteSession(token);
     }
     const secure = req.secure || process.env.HTTPS === "true";
     res.setHeader(
@@ -970,22 +1359,17 @@ app.post(
         .json({ error: "New password must be at least 8 characters." });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id: req.user.id },
-    });
+    const user = await authDb.getUserById(req.user.id);
     if (!user) {
       return res.status(404).json({ error: "User not found." });
     }
-    const isValid = await verifyPassword(oldPassword, user.passwordHash);
+    const isValid = await verifyPassword(oldPassword, user.password_hash);
     if (!isValid) {
       return res.status(400).json({ error: "Old password is incorrect." });
     }
 
     const passwordHash = await hashPassword(newPassword);
-    await prisma.user.update({
-      where: { id: req.user.id },
-      data: { passwordHash },
-    });
+    await authDb.updatePassword({ userId: req.user.id, passwordHash });
 
     res.json({ status: "ok" });
   })
@@ -995,43 +1379,20 @@ app.get(
   "/api/export",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const userId = req.user.id;
-    const [ingredients, foods, recipes, logs, customTargets] =
-      await Promise.all([
-        prisma.ingredient.findMany({
-          where: { userId },
-          orderBy: { name: "asc" },
-        }),
-        prisma.food.findMany({
-          where: { userId },
-          orderBy: { name: "asc" },
-        }),
-        prisma.recipe.findMany({
-          where: { userId },
-          orderBy: { name: "asc" },
-          include: {
-            items: {
-              include: { ingredient: true },
-            },
-          },
-        }),
-        prisma.logEntry.findMany({
-          where: { userId },
-          orderBy: { consumedAt: "desc" },
-          include: {
-            ingredient: true,
-            food: true,
-            recipe: {
-              include: {
-                items: {
-                  include: { ingredient: true },
-                },
-              },
-            },
-          },
-        }),
-        getCustomTargetsForUser(userId),
-      ]);
+    const userId = req.foodUserId;
+    const [
+      ingredientData,
+      foodData,
+      recipeData,
+      logs,
+      customTargets,
+    ] = await Promise.all([
+      fetchFoods({ userId, isIngredient: true }),
+      fetchFoods({ userId, isIngredient: false }),
+      fetchRecipes({ userId }),
+      fetchLogsForExport(userId),
+      getCustomTargetsForUser(userId),
+    ]);
 
     const targets = buildTargetsPayload(customTargets);
     res.json({
@@ -1043,9 +1404,19 @@ app.get(
       },
       targets,
       customTargets,
-      ingredients,
-      foods,
-      recipes,
+      ingredients: ingredientData.foods.map(serializeFood),
+      foods: foodData.foods.map(serializeFood),
+      recipes: recipeData.recipes.map((recipe) => ({
+        id: recipe.id,
+        name: recipe.name,
+        notes: recipe.notes ?? null,
+        servings: recipe.servings,
+        items: recipe.items.map((item) => ({
+          ingredientId: item.ingredientId,
+          quantity: item.quantity,
+          unit: item.unit,
+        })),
+      })),
       logs,
     });
   })
@@ -1077,11 +1448,12 @@ app.post(
     const customTargets = Array.isArray(payload.customTargets)
       ? payload.customTargets
       : [];
+    const userId = req.foodUserId;
 
     const incomingTargets = new Map();
     customTargets.forEach((target) => {
       const key = String(target?.key || "").trim();
-      if (!key || !TARGET_CATALOG[key]) {
+      if (!key) {
         return;
       }
       if (!incomingTargets.has(key)) {
@@ -1113,129 +1485,153 @@ app.post(
       customTargets: { created: 0, updated: 0, skipped: 0 },
     };
 
-    await prisma.$transaction(async (tx) => {
+    await foodDb.run("BEGIN");
+    try {
       if (mode === "replace") {
-        await tx.logEntry.deleteMany({ where: { userId: req.user.id } });
-        await tx.recipeIngredient.deleteMany({
-          where: { recipe: { userId: req.user.id } },
-        });
-        await tx.recipe.deleteMany({ where: { userId: req.user.id } });
-        await tx.ingredient.deleteMany({ where: { userId: req.user.id } });
-        await tx.food.deleteMany({ where: { userId: req.user.id } });
-        await tx.customTarget.deleteMany({ where: { userId: req.user.id } });
+        await foodDb.run(
+          `DELETE FROM "UserIntakeLogs" WHERE "user_id" = ?`,
+          [userId]
+        );
+        await foodDb.run(
+          `DELETE FROM "FoodsInRecipes" WHERE "recipe_id" IN (SELECT "id" FROM "Recipes" WHERE "user_id" = ?)`,
+          [userId]
+        );
+        await foodDb.run(
+          `DELETE FROM "Recipes" WHERE "user_id" = ?`,
+          [userId]
+        );
+        await foodDb.run(
+          `DELETE FROM "Foods" WHERE "user_id" = ?`,
+          [userId]
+        );
+        await foodDb.run(
+          `DELETE FROM "UsersDailyValues" WHERE "user_id" = ?`,
+          [userId]
+        );
       }
 
-      const existingIngredients = await tx.ingredient.findMany({
-        where: { userId: req.user.id, deletedAt: null },
-        select: { id: true, barcode: true, name: true, unit: true },
-      });
-      const ingredientById = new Map(
-        existingIngredients.map((item) => [item.id, item])
+      const existingFoods = await foodDb.all(
+        `SELECT "id", "barcode", "name", "is_ingredient", "serving_unit", "serving_size" FROM "Foods"
+         WHERE "user_id" = ? AND "is_deleted" = 0`,
+        [userId]
       );
       const existingByBarcode = new Map();
       const existingByName = new Map();
-      existingIngredients.forEach((item) => {
+      const foodMetaById = new Map();
+      existingFoods.forEach((item) => {
         if (item.barcode) {
-          existingByBarcode.set(item.barcode, item);
+          existingByBarcode.set(
+            `${item.is_ingredient}:${item.barcode}`,
+            item
+          );
         }
         const nameKey = normalizeNameKey(item.name);
         if (nameKey) {
-          existingByName.set(nameKey, item);
+          existingByName.set(`${item.is_ingredient}:${nameKey}`, item);
         }
+        foodMetaById.set(item.id, {
+          id: item.id,
+          unit: item.serving_unit,
+          servingSize: parseNumber(item.serving_size, 1),
+        });
       });
 
-      const createdByBarcode = new Map();
-      const createdByName = new Map();
       const ingredientIdMap = new Map();
+      const foodIdMap = new Map();
+
+      const insertFood = async (payload, isIngredient) => {
+        const data = buildFoodPayload(payload, isIngredient);
+        if (!data) {
+          return null;
+        }
+        const result = await foodDb.run(
+          `INSERT INTO "Foods" ("user_id", "name", "barcode", "ingredients_list", "allergens_list",
+            "serving_size", "serving_unit", "servings_per_container", "is_ingredient")
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            userId,
+            data.name,
+            data.barcode,
+            data.ingredientsList,
+            data.allergensList,
+            data.servingSize,
+            data.servingUnit,
+            data.servingsPerContainer,
+            data.isIngredient ? 1 : 0,
+          ]
+        );
+        const nutrients = buildFoodNutrientValues(payload);
+        await upsertFoodNutrients(result.lastID, nutrients);
+        await saveDefaultAlternateUnit(
+          result.lastID,
+          data.servingLabel,
+          data.servingSize,
+          data.servingUnit
+        );
+        foodMetaById.set(result.lastID, {
+          id: result.lastID,
+          unit: data.servingUnit,
+          servingSize: data.servingSize,
+        });
+        return result.lastID;
+      };
 
       for (const ingredient of ingredients) {
         const originalId = ingredient?.id;
         const barcode = parseOptionalString(ingredient?.barcode);
         const nameKey = normalizeNameKey(ingredient?.name);
         let matched =
-          (barcode && (existingByBarcode.get(barcode) || createdByBarcode.get(barcode))) ||
-          (nameKey && (existingByName.get(nameKey) || createdByName.get(nameKey)));
+          (barcode && existingByBarcode.get(`1:${barcode}`)) ||
+          (nameKey && existingByName.get(`1:${nameKey}`));
 
         if (matched) {
           ingredientIdMap.set(originalId, matched.id);
+          if (!foodMetaById.has(matched.id)) {
+            foodMetaById.set(matched.id, {
+              id: matched.id,
+              unit: matched.serving_unit,
+              servingSize: parseNumber(matched.serving_size, 1),
+            });
+          }
           summary.ingredients.reused += 1;
           continue;
         }
-
-        const data = buildIngredientPayload(ingredient, req.user.id);
-        if (!data) {
+        const createdId = await insertFood(ingredient, true);
+        if (!createdId) {
           summary.ingredients.skipped += 1;
           continue;
         }
-
-        const created = await tx.ingredient.create({ data });
-        ingredientIdMap.set(originalId, created.id);
-        ingredientById.set(created.id, created);
+        ingredientIdMap.set(originalId, createdId);
         summary.ingredients.created += 1;
-        if (created.barcode) {
-          createdByBarcode.set(created.barcode, created);
-        }
-        const createdNameKey = normalizeNameKey(created.name);
-        if (createdNameKey) {
-          createdByName.set(createdNameKey, created);
-        }
       }
-
-      const existingFoods = await tx.food.findMany({
-        where: { userId: req.user.id, deletedAt: null },
-        select: { id: true, barcode: true, name: true, unit: true },
-      });
-      const foodById = new Map(existingFoods.map((item) => [item.id, item]));
-      const existingFoodByBarcode = new Map();
-      const existingFoodByName = new Map();
-      existingFoods.forEach((item) => {
-        if (item.barcode) {
-          existingFoodByBarcode.set(item.barcode, item);
-        }
-        const nameKey = normalizeNameKey(item.name);
-        if (nameKey) {
-          existingFoodByName.set(nameKey, item);
-        }
-      });
-
-      const createdFoodByBarcode = new Map();
-      const createdFoodByName = new Map();
-      const foodIdMap = new Map();
 
       for (const food of foods) {
         const originalId = food?.id;
         const barcode = parseOptionalString(food?.barcode);
         const nameKey = normalizeNameKey(food?.name);
         let matched =
-          (barcode &&
-            (existingFoodByBarcode.get(barcode) ||
-              createdFoodByBarcode.get(barcode))) ||
-          (nameKey &&
-            (existingFoodByName.get(nameKey) || createdFoodByName.get(nameKey)));
+          (barcode && existingByBarcode.get(`0:${barcode}`)) ||
+          (nameKey && existingByName.get(`0:${nameKey}`));
 
         if (matched) {
           foodIdMap.set(originalId, matched.id);
+          if (!foodMetaById.has(matched.id)) {
+            foodMetaById.set(matched.id, {
+              id: matched.id,
+              unit: matched.serving_unit,
+              servingSize: parseNumber(matched.serving_size, 1),
+            });
+          }
           summary.foods.reused += 1;
           continue;
         }
-
-        const data = buildFoodPayload(food, req.user.id);
-        if (!data) {
+        const createdId = await insertFood(food, false);
+        if (!createdId) {
           summary.foods.skipped += 1;
           continue;
         }
-
-        const created = await tx.food.create({ data });
-        foodIdMap.set(originalId, created.id);
-        foodById.set(created.id, created);
+        foodIdMap.set(originalId, createdId);
         summary.foods.created += 1;
-        if (created.barcode) {
-          createdFoodByBarcode.set(created.barcode, created);
-        }
-        const createdNameKey = normalizeNameKey(created.name);
-        if (createdNameKey) {
-          createdFoodByName.set(createdNameKey, created);
-        }
       }
 
       const recipeIdMap = new Map();
@@ -1253,14 +1649,20 @@ app.post(
           if (!mappedIngredientId) {
             continue;
           }
-          const ingredient = ingredientById.get(mappedIngredientId);
-          const unit = String(item?.unit || "").trim() || ingredient?.unit || "";
+          const ingredient = foodMetaById.get(mappedIngredientId);
+          let unit = String(item?.unit || "").trim();
+          if (!unit && ingredient?.unit) {
+            unit = ingredient.unit;
+          }
           const quantity = parseNumber(item?.quantity, 1);
           if (!unit) {
             continue;
           }
           const normalized = normalizeIngredientQuantity(
-            ingredient,
+            {
+              unit,
+              servingSize: ingredient?.servingSize ?? 1,
+            },
             quantity,
             unit
           );
@@ -1280,34 +1682,48 @@ app.post(
         }
 
         const servings = parseNumber(recipe?.servings, 1);
-        const created = await tx.recipe.create({
-          data: {
+        const result = await foodDb.run(
+          `INSERT INTO "Recipes" ("user_id", "name", "servings", "notes")
+           VALUES (?, ?, ?, ?)`,
+          [
+            userId,
             name,
-            notes: parseOptionalString(recipe?.notes),
-            servings: servings > 0 ? Math.round(servings) : 1,
-            userId: req.user.id,
-            items: {
-              create: mappedItems,
-            },
-          },
-        });
-        recipeIdMap.set(recipe?.id, created.id);
+            servings > 0 ? Math.round(servings) : 1,
+            parseOptionalString(recipe?.notes),
+          ]
+        );
+        recipeIdMap.set(recipe?.id, result.lastID);
         summary.recipes.created += 1;
+
+        for (const item of mappedItems) {
+          await foodDb.run(
+            `INSERT INTO "FoodsInRecipes" ("recipe_id", "food_id", "quantity", "unit")
+             VALUES (?, ?, ?, ?)`,
+            [result.lastID, item.ingredientId, item.quantity, item.unit]
+          );
+        }
       }
 
+      const allFoodIds = [
+        ...ingredientIdMap.values(),
+        ...foodIdMap.values(),
+      ];
+      const { byId: foodById } = await fetchFoods({
+        userId,
+        ids: Array.from(new Set(allFoodIds)),
+        includeDeleted: true,
+      });
+
       for (const entry of logs) {
-        const mappedIngredientId = entry?.ingredientId
+        const mappedFoodId = entry?.ingredientId
           ? ingredientIdMap.get(entry.ingredientId)
-          : null;
-        const mappedFoodId = entry?.foodId
-          ? foodIdMap.get(entry.foodId)
-          : null;
+          : entry?.foodId
+            ? foodIdMap.get(entry.foodId)
+            : null;
         const mappedRecipeId = entry?.recipeId
           ? recipeIdMap.get(entry.recipeId)
           : null;
-        const resolvedTargets = [mappedIngredientId, mappedFoodId, mappedRecipeId].filter(
-          (id) => Boolean(id)
-        );
+        const resolvedTargets = [mappedFoodId, mappedRecipeId].filter(Boolean);
         if (resolvedTargets.length !== 1) {
           summary.logs.skipped += 1;
           continue;
@@ -1316,28 +1732,16 @@ app.post(
         const consumedAt = parseDate(entry?.consumedAt);
         let unit = String(entry?.unit || "").trim();
 
-        if (mappedIngredientId) {
-          const ingredient = ingredientById.get(mappedIngredientId);
-          if (!unit) {
-            unit = ingredient?.unit || "";
-          }
-          const normalized = normalizeIngredientQuantity(
-            ingredient,
-            quantity,
-            unit
-          );
-          if (normalized.error) {
-            summary.logs.skipped += 1;
-            continue;
-          }
-        }
-
         if (mappedFoodId) {
           const food = foodById.get(mappedFoodId);
           if (!unit) {
             unit = food?.unit || "";
           }
-          const normalized = normalizeIngredientQuantity(food, quantity, unit);
+          const normalized = normalizeIngredientQuantity(
+            food,
+            quantity,
+            unit
+          );
           if (normalized.error) {
             summary.logs.skipped += 1;
             continue;
@@ -1355,76 +1759,78 @@ app.post(
           }
         }
 
-        await tx.logEntry.create({
-          data: {
-            ingredientId: mappedIngredientId,
-            foodId: mappedFoodId,
-            recipeId: mappedRecipeId,
+        await foodDb.run(
+          `INSERT INTO "UserIntakeLogs" ("user_id", "food_id", "recipe_id", "quantity", "unit", "logged_at_epoch", "intake_date", "notes")
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            userId,
+            mappedFoodId,
+            mappedRecipeId,
             quantity,
             unit,
-            notes: parseOptionalString(entry?.notes),
-            consumedAt,
-            userId: req.user.id,
-          },
-        });
+            Math.floor(consumedAt.getTime() / 1000),
+            toIntakeDate(consumedAt),
+            parseOptionalString(entry?.notes),
+          ]
+        );
         summary.logs.created += 1;
       }
 
       if (incomingTargets.size) {
         for (const target of incomingTargets.values()) {
           const key = String(target?.key || "").trim();
-          const catalog = TARGET_CATALOG[key];
-          if (!catalog) {
+          if (!key) {
             summary.customTargets.skipped += 1;
             continue;
           }
+          const catalog = TARGET_CATALOG[key];
           const isCore = isCoreTargetKey(key);
           const targetValue = parseOptionalNumber(target?.target);
-          if (targetValue === null) {
-            if (!isCore) {
-              summary.customTargets.skipped += 1;
-              continue;
-            }
-          } else if (targetValue < 0 || (!isCore && targetValue <= 0)) {
+          if (targetValue === null && !isCore) {
             summary.customTargets.skipped += 1;
             continue;
           }
+          if (targetValue !== null && targetValue < 0) {
+            summary.customTargets.skipped += 1;
+            continue;
+          }
+          const unit = target?.unit || catalog?.unit || "g";
+          const nutrient = await ensureNutrient(key, unit, 0);
           const label =
-            String(target?.label || catalog.label).trim() || catalog.label;
+            String(target?.label || catalog?.label || key).trim() ||
+            catalog?.label ||
+            key;
           const allowOver = parseBoolean(target?.allowOver);
 
-          const existing = await tx.customTarget.findFirst({
-            where: { userId: req.user.id, key },
-          });
+          const existing = await foodDb.get(
+            `SELECT "id" FROM "UsersDailyValues" WHERE "user_id" = ? AND "nutrient_id" = ? LIMIT 1`,
+            [userId, nutrient.id]
+          );
           if (existing) {
-            await tx.customTarget.update({
-              where: { id: existing.id },
-              data: {
-                label,
-                unit: catalog.unit,
-                target: targetValue,
-                allowOver,
-              },
-            });
+            await foodDb.run(
+              `UPDATE "UsersDailyValues"
+                 SET "label" = ?, "target_value" = ?, "allow_exceed" = ?
+               WHERE "id" = ?`,
+              [label, targetValue ?? 0, allowOver ? 1 : 0, existing.id]
+            );
             summary.customTargets.updated += 1;
           } else {
-            await tx.customTarget.create({
-              data: {
-                key,
-                label,
-                unit: catalog.unit,
-                target: targetValue,
-                allowOver,
-                userId: req.user.id,
-              },
-            });
+            await foodDb.run(
+              `INSERT INTO "UsersDailyValues" ("user_id", "nutrient_id", "label", "target_value", "allow_exceed")
+               VALUES (?, ?, ?, ?, ?)`,
+              [userId, nutrient.id, label, targetValue ?? 0, allowOver ? 1 : 0]
+            );
             summary.customTargets.created += 1;
           }
         }
       }
 
-      await ensureCoreTargets(req.user.id, tx);
-    });
+      await ensureCoreTargets(userId);
+      await foodDb.run("COMMIT");
+    } catch (error) {
+      await foodDb.run("ROLLBACK");
+      throw error;
+    }
 
     res.json(summary);
   })
@@ -1437,15 +1843,15 @@ const buildRecipeItems = async (items, userId) => {
     .map((item) => Number(item.ingredientId))
     .filter((id) => Number.isFinite(id));
   const uniqueIngredientIds = Array.from(new Set(ingredientIds));
-  const ingredients = await prisma.ingredient.findMany({
-    where: { id: { in: uniqueIngredientIds }, userId, deletedAt: null },
+  const { byId: ingredientMap } = await fetchFoods({
+    userId,
+    ids: uniqueIngredientIds,
+    isIngredient: true,
+    includeDeleted: false,
   });
-  if (ingredients.length !== uniqueIngredientIds.length) {
+  if (ingredientMap.size !== uniqueIngredientIds.length) {
     return { error: "Ingredient not found." };
   }
-  const ingredientMap = new Map(
-    ingredients.map((ingredient) => [ingredient.id, ingredient])
-  );
   const payloadItems = [];
 
   for (const item of items) {
@@ -1467,7 +1873,7 @@ const buildRecipeItems = async (items, userId) => {
       return { error: `${normalized.error} (${ingredient.name}).` };
     }
     payloadItems.push({
-      ingredientId,
+      foodId: ingredientId,
       quantity,
       unit,
     });
@@ -1480,18 +1886,13 @@ app.get(
   "/api/ingredients",
   asyncHandler(async (req, res) => {
     const { barcode, search } = req.query;
-    const where = { userId: req.user.id, deletedAt: null };
-    if (barcode) {
-      where.barcode = String(barcode);
-    }
-    if (search) {
-      where.name = { contains: String(search), mode: "insensitive" };
-    }
-    const ingredients = await prisma.ingredient.findMany({
-      where,
-      orderBy: { name: "asc" },
+    const { foods } = await fetchFoods({
+      userId: req.foodUserId,
+      isIngredient: true,
+      barcode,
+      search,
     });
-    res.json(ingredients);
+    res.json(foods.map(serializeFood));
   })
 );
 
@@ -1517,15 +1918,16 @@ app.get(
     }
     const isFood = type === "food";
 
-    const existing = await (isFood ? prisma.food : prisma.ingredient).findFirst(
-      {
-        where: { barcode, userId: req.user.id, deletedAt: null },
-      }
-    );
+    const existingLookup = await fetchFoods({
+      userId: req.foodUserId,
+      isIngredient: !isFood,
+      barcode,
+    });
+    const existing = existingLookup.foods[0];
     if (existing) {
       return res.json({
         source: "local",
-        [isFood ? "food" : "ingredient"]: existing,
+        [isFood ? "food" : "ingredient"]: serializeFood(existing),
       });
     }
 
@@ -1636,43 +2038,54 @@ app.post(
         .status(400)
         .json({ error: `${invalidField} must be a number.` });
     }
-    const data = {
-      name: String(req.body.name || "").trim(),
-      barcode: parseOptionalString(req.body.barcode),
-      calories: parseNumber(req.body.calories),
-      protein: parseNumber(req.body.protein),
-      carbs: parseNumber(req.body.carbs),
-      fat: parseNumber(req.body.fat),
-      unit: String(req.body.unit || "").trim(),
-      servingSize: parseOptionalString(req.body.servingSize),
-      servingsPerContainer: parseOptionalString(req.body.servingsPerContainer),
-      saturatedFat: parseOptionalNumber(req.body.saturatedFat),
-      transFat: parseOptionalNumber(req.body.transFat),
-      cholesterolMg: parseOptionalNumber(req.body.cholesterolMg),
-      sodiumMg: parseOptionalNumber(req.body.sodiumMg),
-      dietaryFiber: parseOptionalNumber(req.body.dietaryFiber),
-      totalSugars: parseOptionalNumber(req.body.totalSugars),
-      addedSugars: parseOptionalNumber(req.body.addedSugars),
-      vitaminDMcg: parseOptionalNumber(req.body.vitaminDMcg),
-      calciumMg: parseOptionalNumber(req.body.calciumMg),
-      ironMg: parseOptionalNumber(req.body.ironMg),
-      potassiumMg: parseOptionalNumber(req.body.potassiumMg),
-      ingredientsList: parseOptionalString(req.body.ingredientsList),
-      vitamins: parseOptionalString(req.body.vitamins),
-      allergens: parseOptionalString(req.body.allergens),
-      userId: req.user.id,
-    };
-
-    if (!data.name) {
-      return res.status(400).json({ error: "Ingredient name is required." });
+    const data = buildFoodPayload(req.body, true);
+    if (!data) {
+      return res
+        .status(400)
+        .json({ error: "Ingredient name and unit are required." });
     }
 
-    if (!data.unit) {
-      return res.status(400).json({ error: "Ingredient unit is required." });
-    }
-
-    const ingredient = await prisma.ingredient.create({ data });
-    res.status(201).json(ingredient);
+    const result = await foodDb.run(
+      `INSERT INTO "Foods" ("user_id", "name", "barcode", "ingredients_list", "allergens_list",
+        "serving_size", "serving_unit", "servings_per_container", "is_ingredient")
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        req.foodUserId,
+        data.name,
+        data.barcode,
+        data.ingredientsList,
+        data.allergensList,
+        data.servingSize,
+        data.servingUnit,
+        data.servingsPerContainer,
+        1,
+      ]
+    );
+    const nutrients = buildFoodNutrientValues(req.body);
+    await upsertFoodNutrients(result.lastID, nutrients);
+    await saveDefaultAlternateUnit(
+      result.lastID,
+      data.servingLabel,
+      data.servingSize,
+      data.servingUnit
+    );
+    const model = buildFoodModel(
+      {
+        id: result.lastID,
+        name: data.name,
+        barcode: data.barcode,
+        ingredients_list: data.ingredientsList,
+        allergens_list: data.allergensList,
+        serving_label: data.servingLabel,
+        serving_unit: data.servingUnit,
+        serving_size: data.servingSize,
+        servings_per_container: data.servingsPerContainer,
+        is_ingredient: 1,
+        is_deleted: 0,
+      },
+      nutrients
+    );
+    res.status(201).json(serializeFood(model));
   })
 );
 
@@ -1705,47 +2118,61 @@ app.put(
         .status(400)
         .json({ error: `${invalidField} must be a number.` });
     }
-    const existing = await prisma.ingredient.findFirst({
-      where: { id: ingredientId, userId: req.user.id, deletedAt: null },
-    });
+    const existing = await foodDb.get(
+      `SELECT * FROM "Foods" WHERE "id" = ? AND "user_id" = ? AND "is_ingredient" = 1 AND "is_deleted" = 0`,
+      [ingredientId, req.foodUserId]
+    );
     if (!existing) {
       return res.status(404).json({ error: "Ingredient not found." });
     }
-    const data = {
-      name: String(req.body.name || "").trim(),
-      barcode: parseOptionalString(req.body.barcode),
-      calories: parseNumber(req.body.calories),
-      protein: parseNumber(req.body.protein),
-      carbs: parseNumber(req.body.carbs),
-      fat: parseNumber(req.body.fat),
-      unit: String(req.body.unit || "").trim(),
-      servingSize: parseOptionalString(req.body.servingSize),
-      servingsPerContainer: parseOptionalString(req.body.servingsPerContainer),
-      saturatedFat: parseOptionalNumber(req.body.saturatedFat),
-      transFat: parseOptionalNumber(req.body.transFat),
-      cholesterolMg: parseOptionalNumber(req.body.cholesterolMg),
-      sodiumMg: parseOptionalNumber(req.body.sodiumMg),
-      dietaryFiber: parseOptionalNumber(req.body.dietaryFiber),
-      totalSugars: parseOptionalNumber(req.body.totalSugars),
-      addedSugars: parseOptionalNumber(req.body.addedSugars),
-      vitaminDMcg: parseOptionalNumber(req.body.vitaminDMcg),
-      calciumMg: parseOptionalNumber(req.body.calciumMg),
-      ironMg: parseOptionalNumber(req.body.ironMg),
-      potassiumMg: parseOptionalNumber(req.body.potassiumMg),
-      ingredientsList: parseOptionalString(req.body.ingredientsList),
-      vitamins: parseOptionalString(req.body.vitamins),
-      allergens: parseOptionalString(req.body.allergens),
-    };
-
-    if (!data.name || !data.unit) {
-      return res.status(400).json({ error: "Name and unit are required." });
+    const data = buildFoodPayload(req.body, true);
+    if (!data) {
+      return res
+        .status(400)
+        .json({ error: "Ingredient name and unit are required." });
     }
 
-    const ingredient = await prisma.ingredient.update({
-      where: { id: ingredientId },
-      data,
-    });
-    res.json(ingredient);
+    await foodDb.run(
+      `UPDATE "Foods"
+         SET "name" = ?, "barcode" = ?, "ingredients_list" = ?, "allergens_list" = ?,
+             "serving_size" = ?, "serving_unit" = ?, "servings_per_container" = ?
+       WHERE "id" = ?`,
+      [
+        data.name,
+        data.barcode,
+        data.ingredientsList,
+        data.allergensList,
+        data.servingSize,
+        data.servingUnit,
+        data.servingsPerContainer,
+        ingredientId,
+      ]
+    );
+    const nutrients = buildFoodNutrientValues(req.body);
+    await upsertFoodNutrients(ingredientId, nutrients);
+    await saveDefaultAlternateUnit(
+      ingredientId,
+      data.servingLabel,
+      data.servingSize,
+      data.servingUnit
+    );
+    const model = buildFoodModel(
+      {
+        id: ingredientId,
+        name: data.name,
+        barcode: data.barcode,
+        ingredients_list: data.ingredientsList,
+        allergens_list: data.allergensList,
+        serving_label: data.servingLabel,
+        serving_unit: data.servingUnit,
+        serving_size: data.servingSize,
+        servings_per_container: data.servingsPerContainer,
+        is_ingredient: 1,
+        is_deleted: 0,
+      },
+      nutrients
+    );
+    res.json(serializeFood(model));
   })
 );
 
@@ -1756,11 +2183,11 @@ app.delete(
     if (!Number.isFinite(ingredientId)) {
       return res.status(400).json({ error: "Invalid ingredient id." });
     }
-    const result = await prisma.ingredient.updateMany({
-      where: { id: ingredientId, userId: req.user.id, deletedAt: null },
-      data: { deletedAt: new Date(), barcode: null },
-    });
-    if (!result.count) {
+    const result = await foodDb.run(
+      `UPDATE "Foods" SET "is_deleted" = 1 WHERE "id" = ? AND "user_id" = ? AND "is_ingredient" = 1 AND "is_deleted" = 0`,
+      [ingredientId, req.foodUserId]
+    );
+    if (!result.changes) {
       return res.status(404).json({ error: "Ingredient not found." });
     }
     res.status(204).end();
@@ -1771,18 +2198,13 @@ app.get(
   "/api/foods",
   asyncHandler(async (req, res) => {
     const { barcode, search } = req.query;
-    const where = { userId: req.user.id, deletedAt: null };
-    if (barcode) {
-      where.barcode = String(barcode);
-    }
-    if (search) {
-      where.name = { contains: String(search), mode: "insensitive" };
-    }
-    const foods = await prisma.food.findMany({
-      where,
-      orderBy: { name: "asc" },
+    const { foods } = await fetchFoods({
+      userId: req.foodUserId,
+      isIngredient: false,
+      barcode,
+      search,
     });
-    res.json(foods);
+    res.json(foods.map(serializeFood));
   })
 );
 
@@ -1811,13 +2233,51 @@ app.post(
         .status(400)
         .json({ error: `${invalidField} must be a number.` });
     }
-    const data = buildFoodPayload(req.body, req.user.id);
+    const data = buildFoodPayload(req.body, false);
     if (!data) {
       return res.status(400).json({ error: "Food name and unit are required." });
     }
-
-    const food = await prisma.food.create({ data });
-    res.status(201).json(food);
+    const result = await foodDb.run(
+      `INSERT INTO "Foods" ("user_id", "name", "barcode", "ingredients_list", "allergens_list",
+        "serving_size", "serving_unit", "servings_per_container", "is_ingredient")
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        req.foodUserId,
+        data.name,
+        data.barcode,
+        data.ingredientsList,
+        data.allergensList,
+        data.servingSize,
+        data.servingUnit,
+        data.servingsPerContainer,
+        0,
+      ]
+    );
+    const nutrients = buildFoodNutrientValues(req.body);
+    await upsertFoodNutrients(result.lastID, nutrients);
+    await saveDefaultAlternateUnit(
+      result.lastID,
+      data.servingLabel,
+      data.servingSize,
+      data.servingUnit
+    );
+    const model = buildFoodModel(
+      {
+        id: result.lastID,
+        name: data.name,
+        barcode: data.barcode,
+        ingredients_list: data.ingredientsList,
+        allergens_list: data.allergensList,
+        serving_label: data.servingLabel,
+        serving_unit: data.servingUnit,
+        serving_size: data.servingSize,
+        servings_per_container: data.servingsPerContainer,
+        is_ingredient: 0,
+        is_deleted: 0,
+      },
+      nutrients
+    );
+    res.status(201).json(serializeFood(model));
   })
 );
 
@@ -1850,23 +2310,58 @@ app.put(
         .status(400)
         .json({ error: `${invalidField} must be a number.` });
     }
-    const existing = await prisma.food.findFirst({
-      where: { id: foodId, userId: req.user.id, deletedAt: null },
-    });
+    const existing = await foodDb.get(
+      `SELECT * FROM "Foods" WHERE "id" = ? AND "user_id" = ? AND "is_ingredient" = 0 AND "is_deleted" = 0`,
+      [foodId, req.foodUserId]
+    );
     if (!existing) {
       return res.status(404).json({ error: "Food not found." });
     }
-    const data = buildFoodPayload(req.body, req.user.id);
+    const data = buildFoodPayload(req.body, false);
     if (!data) {
       return res.status(400).json({ error: "Food name and unit are required." });
     }
-    delete data.userId;
-
-    const food = await prisma.food.update({
-      where: { id: foodId },
-      data,
-    });
-    res.json(food);
+    await foodDb.run(
+      `UPDATE "Foods"
+         SET "name" = ?, "barcode" = ?, "ingredients_list" = ?, "allergens_list" = ?,
+             "serving_size" = ?, "serving_unit" = ?, "servings_per_container" = ?
+       WHERE "id" = ?`,
+      [
+        data.name,
+        data.barcode,
+        data.ingredientsList,
+        data.allergensList,
+        data.servingSize,
+        data.servingUnit,
+        data.servingsPerContainer,
+        foodId,
+      ]
+    );
+    const nutrients = buildFoodNutrientValues(req.body);
+    await upsertFoodNutrients(foodId, nutrients);
+    await saveDefaultAlternateUnit(
+      foodId,
+      data.servingLabel,
+      data.servingSize,
+      data.servingUnit
+    );
+    const model = buildFoodModel(
+      {
+        id: foodId,
+        name: data.name,
+        barcode: data.barcode,
+        ingredients_list: data.ingredientsList,
+        allergens_list: data.allergensList,
+        serving_label: data.servingLabel,
+        serving_unit: data.servingUnit,
+        serving_size: data.servingSize,
+        servings_per_container: data.servingsPerContainer,
+        is_ingredient: 0,
+        is_deleted: 0,
+      },
+      nutrients
+    );
+    res.json(serializeFood(model));
   })
 );
 
@@ -1877,11 +2372,11 @@ app.delete(
     if (!Number.isFinite(foodId)) {
       return res.status(400).json({ error: "Invalid food id." });
     }
-    const result = await prisma.food.updateMany({
-      where: { id: foodId, userId: req.user.id, deletedAt: null },
-      data: { deletedAt: new Date(), barcode: null },
-    });
-    if (!result.count) {
+    const result = await foodDb.run(
+      `UPDATE "Foods" SET "is_deleted" = 1 WHERE "id" = ? AND "user_id" = ? AND "is_ingredient" = 0 AND "is_deleted" = 0`,
+      [foodId, req.foodUserId]
+    );
+    if (!result.changes) {
       return res.status(404).json({ error: "Food not found." });
     }
     res.status(204).end();
@@ -1891,15 +2386,7 @@ app.delete(
 app.get(
   "/api/recipes",
   asyncHandler(async (req, res) => {
-    const recipes = await prisma.recipe.findMany({
-      where: { userId: req.user.id, deletedAt: null },
-      orderBy: { name: "asc" },
-      include: {
-        items: {
-          include: { ingredient: true },
-        },
-      },
-    });
+    const { recipes } = await fetchRecipes({ userId: req.foodUserId });
     res.json(recipes.map(formatRecipe));
   })
 );
@@ -1929,28 +2416,47 @@ app.post(
         .json({ error: "Add at least one ingredient item." });
     }
 
-    const { payloadItems, error } = await buildRecipeItems(items, req.user.id);
+    const { payloadItems, error } = await buildRecipeItems(
+      items,
+      req.foodUserId
+    );
     if (error) {
       return res.status(400).json({ error });
     }
 
-    const recipe = await prisma.recipe.create({
-      data: {
-        name,
-        notes,
-        servings: servings > 0 ? Math.round(servings) : 1,
-        userId: req.user.id,
-        items: {
-          create: payloadItems,
-        },
-      },
-      include: {
-        items: {
-          include: { ingredient: true },
-        },
-      },
-    });
+    await foodDb.run("BEGIN");
+    let recipeId;
+    try {
+      const result = await foodDb.run(
+        `INSERT INTO "Recipes" ("user_id", "name", "servings", "notes")
+         VALUES (?, ?, ?, ?)`,
+        [
+          req.foodUserId,
+          name,
+          servings > 0 ? Math.round(servings) : 1,
+          notes,
+        ]
+      );
+      recipeId = result.lastID;
+      for (const item of payloadItems) {
+        await foodDb.run(
+          `INSERT INTO "FoodsInRecipes" ("recipe_id", "food_id", "quantity", "unit")
+           VALUES (?, ?, ?, ?)`,
+          [recipeId, item.foodId, item.quantity, item.unit]
+        );
+      }
+      await foodDb.run("COMMIT");
+    } catch (error) {
+      await foodDb.run("ROLLBACK");
+      throw error;
+    }
 
+    const { recipes } = await fetchRecipes({
+      userId: req.foodUserId,
+      ids: [recipeId],
+      includeDeleted: true,
+    });
+    const recipe = recipes[0];
     res.status(201).json(formatRecipe(recipe));
   })
 );
@@ -1984,34 +2490,55 @@ app.put(
         .json({ error: "Add at least one ingredient item." });
     }
 
-    const { payloadItems, error } = await buildRecipeItems(items, req.user.id);
+    const { payloadItems, error } = await buildRecipeItems(
+      items,
+      req.foodUserId
+    );
     if (error) {
       return res.status(400).json({ error });
     }
 
-    const recipe = await prisma.$transaction(async (tx) => {
-      await tx.recipeIngredient.deleteMany({
-        where: { recipeId },
-      });
+    const existing = await foodDb.get(
+      `SELECT "id" FROM "Recipes" WHERE "id" = ? AND "user_id" = ? AND "is_deleted" = 0`,
+      [recipeId, req.foodUserId]
+    );
+    if (!existing) {
+      return res.status(404).json({ error: "Recipe not found." });
+    }
 
-      return tx.recipe.update({
-        where: { id: recipeId },
-        data: {
+    await foodDb.run("BEGIN");
+    try {
+      await foodDb.run(`DELETE FROM "FoodsInRecipes" WHERE "recipe_id" = ?`, [
+        recipeId,
+      ]);
+      await foodDb.run(
+        `UPDATE "Recipes" SET "name" = ?, "servings" = ?, "notes" = ? WHERE "id" = ?`,
+        [
           name,
+          servings > 0 ? Math.round(servings) : 1,
           notes,
-          servings: servings > 0 ? Math.round(servings) : 1,
-          items: {
-            create: payloadItems,
-          },
-        },
-        include: {
-          items: {
-            include: { ingredient: true },
-          },
-        },
-      });
-    });
+          recipeId,
+        ]
+      );
+      for (const item of payloadItems) {
+        await foodDb.run(
+          `INSERT INTO "FoodsInRecipes" ("recipe_id", "food_id", "quantity", "unit")
+           VALUES (?, ?, ?, ?)`,
+          [recipeId, item.foodId, item.quantity, item.unit]
+        );
+      }
+      await foodDb.run("COMMIT");
+    } catch (error) {
+      await foodDb.run("ROLLBACK");
+      throw error;
+    }
 
+    const { recipes } = await fetchRecipes({
+      userId: req.foodUserId,
+      ids: [recipeId],
+      includeDeleted: true,
+    });
+    const recipe = recipes[0];
     res.json(formatRecipe(recipe));
   })
 );
@@ -2023,11 +2550,11 @@ app.delete(
     if (!Number.isFinite(recipeId)) {
       return res.status(400).json({ error: "Invalid recipe id." });
     }
-    const result = await prisma.recipe.updateMany({
-      where: { id: recipeId, userId: req.user.id, deletedAt: null },
-      data: { deletedAt: new Date() },
-    });
-    if (!result.count) {
+    const result = await foodDb.run(
+      `UPDATE "Recipes" SET "is_deleted" = 1 WHERE "id" = ? AND "user_id" = ? AND "is_deleted" = 0`,
+      [recipeId, req.foodUserId]
+    );
+    if (!result.changes) {
       return res.status(404).json({ error: "Recipe not found." });
     }
     res.status(204).end();
@@ -2040,30 +2567,67 @@ app.get(
     const dateRange = parseDateRange(req.query.date);
     const limit = parsePositiveInt(req.query.limit);
     const offset = parsePositiveInt(req.query.offset);
-    const where = { userId: req.user.id };
+    const conditions = ['"user_id" = ?'];
+    const params = [req.foodUserId];
     if (dateRange) {
-      where.consumedAt = {
-        gte: dateRange.start,
-        lte: dateRange.end,
-      };
+      const start = toIntakeDate(dateRange.start);
+      const end = toIntakeDate(dateRange.end);
+      conditions.push('"intake_date" >= ? AND "intake_date" <= ?');
+      params.push(start, end);
     }
-    const entries = await prisma.logEntry.findMany({
-      ...(Object.keys(where).length ? { where } : {}),
-      orderBy: { consumedAt: "desc" },
-      ...(limit !== null ? { take: Math.min(limit, 500) } : {}),
-      ...(offset !== null ? { skip: offset } : {}),
-      include: {
-        ingredient: true,
-        food: true,
-        recipe: {
-          include: {
-            items: {
-              include: { ingredient: true },
-            },
-          },
-        },
-      },
+    const whereClause = conditions.length
+      ? `WHERE ${conditions.join(" AND ")}`
+      : "";
+    let sql = `SELECT * FROM "UserIntakeLogs" ${whereClause} ORDER BY "logged_at_epoch" DESC`;
+    const limitValue = limit !== null ? Math.min(limit, 500) : null;
+    if (limitValue !== null) {
+      sql += " LIMIT ?";
+      params.push(limitValue);
+    }
+    if (offset !== null) {
+      if (limitValue === null) {
+        sql += " LIMIT -1";
+      }
+      sql += " OFFSET ?";
+      params.push(offset);
+    }
+    const rows = await foodDb.all(sql, params);
+    const foodIds = Array.from(
+      new Set(rows.map((row) => row.food_id).filter(Boolean))
+    );
+    const recipeIds = Array.from(
+      new Set(rows.map((row) => row.recipe_id).filter(Boolean))
+    );
+    const { byId: foodById } = await fetchFoods({
+      userId: req.foodUserId,
+      ids: foodIds,
+      includeDeleted: true,
     });
+    const { byId: recipeById } = await fetchRecipes({
+      userId: req.foodUserId,
+      ids: recipeIds,
+      includeDeleted: true,
+    });
+
+    const entries = rows.map((row) => {
+      const food = row.food_id ? foodById.get(row.food_id) : null;
+      const recipe = row.recipe_id ? recipeById.get(row.recipe_id) : null;
+      const isIngredient = food?.isIngredient;
+      return {
+        id: row.id,
+        ingredientId: isIngredient ? row.food_id : null,
+        foodId: !isIngredient ? row.food_id : null,
+        recipeId: row.recipe_id ?? null,
+        quantity: row.quantity,
+        unit: row.unit,
+        notes: row.notes ?? null,
+        consumedAt: parseNumber(row.logged_at_epoch, 0) * 1000,
+        ingredient: isIngredient ? food : null,
+        food: !isIngredient ? food : null,
+        recipe,
+      };
+    });
+
     res.json(entries.map(formatLogEntry));
   })
 );
@@ -2071,7 +2635,7 @@ app.get(
 app.get(
   "/api/custom-targets",
   asyncHandler(async (req, res) => {
-    const targets = await getCustomTargetsForUser(req.user.id);
+    const targets = await getCustomTargetsForUser(req.foodUserId);
     res.json(targets);
   })
 );
@@ -2098,18 +2662,28 @@ app.post(
     const label = String(req.body.label || catalog.label).trim() || catalog.label;
     const allowOver = parseBoolean(req.body.allowOver);
 
-    const created = await prisma.customTarget.create({
-      data: {
-        key,
-        label,
-        unit: catalog.unit,
-        target,
-        allowOver,
-        userId: req.user.id,
-      },
-    });
+    const nutrient = await ensureNutrient(key, catalog.unit, 0);
+    const existing = await foodDb.get(
+      `SELECT "id" FROM "UsersDailyValues" WHERE "user_id" = ? AND "nutrient_id" = ? LIMIT 1`,
+      [req.foodUserId, nutrient.id]
+    );
+    if (existing) {
+      return res.status(409).json({ error: "Target already exists." });
+    }
+    const result = await foodDb.run(
+      `INSERT INTO "UsersDailyValues" ("user_id", "nutrient_id", "label", "target_value", "allow_exceed")
+       VALUES (?, ?, ?, ?, ?)`,
+      [req.foodUserId, nutrient.id, label, target ?? 0, allowOver ? 1 : 0]
+    );
 
-    res.status(201).json(created);
+    res.status(201).json({
+      id: result.lastID,
+      key,
+      label,
+      unit: nutrient.unit,
+      target: target ?? null,
+      allowOver,
+    });
   })
 );
 
@@ -2121,13 +2695,18 @@ app.put(
       return res.status(400).json({ error: "Invalid target id." });
     }
 
-    const existing = await prisma.customTarget.findFirst({
-      where: { id: targetId, userId: req.user.id },
-    });
+    const existing = await foodDb.get(
+      `SELECT udv.*, n.name, n.unit
+         FROM "UsersDailyValues" udv
+         JOIN "Nutrients" n ON n.id = udv.nutrient_id
+        WHERE udv.id = ? AND udv.user_id = ?
+        LIMIT 1`,
+      [targetId, req.foodUserId]
+    );
     if (!existing) {
       return res.status(404).json({ error: "Target not found." });
     }
-    const isCore = isCoreTargetKey(existing.key);
+    const isCore = isCoreTargetKey(existing.name);
 
     const data = {};
     if (req.body.label !== undefined) {
@@ -2148,21 +2727,48 @@ app.put(
       } else if (target < 0 || (!isCore && target <= 0)) {
         return res.status(400).json({ error: "Target must be greater than 0." });
       }
-      data.target = target;
+      data.target_value = target ?? 0;
     }
     if (req.body.allowOver !== undefined) {
-      data.allowOver = parseBoolean(req.body.allowOver);
+      data.allow_exceed = parseBoolean(req.body.allowOver) ? 1 : 0;
     }
 
     if (!Object.keys(data).length) {
       return res.status(400).json({ error: "No updates provided." });
     }
 
-    const updated = await prisma.customTarget.update({
-      where: { id: existing.id },
-      data,
+    const columns = [];
+    const values = [];
+    Object.entries(data).forEach(([key, value]) => {
+      columns.push(`"${key}" = ?`);
+      values.push(value);
     });
-    res.json(updated);
+    values.push(existing.id);
+    await foodDb.run(
+      `UPDATE "UsersDailyValues" SET ${columns.join(", ")} WHERE "id" = ?`,
+      values
+    );
+
+    const updatedLabel =
+      data.label ??
+      existing.label ??
+      TARGET_CATALOG[existing.name]?.label ??
+      existing.name;
+    const updatedTarget =
+      data.target_value !== undefined ? data.target_value : existing.target_value;
+    const updatedAllow =
+      data.allow_exceed !== undefined
+        ? data.allow_exceed
+        : existing.allow_exceed;
+
+    res.json({
+      id: existing.id,
+      key: existing.name,
+      label: updatedLabel,
+      unit: existing.unit,
+      target: updatedTarget > 0 ? updatedTarget : null,
+      allowOver: Boolean(updatedAllow),
+    });
   })
 );
 
@@ -2173,15 +2779,13 @@ app.delete(
     if (!Number.isFinite(targetId)) {
       return res.status(400).json({ error: "Invalid target id." });
     }
-    const existing = await prisma.customTarget.findFirst({
-      where: { id: targetId, userId: req.user.id },
-    });
-    if (!existing) {
+    const result = await foodDb.run(
+      `DELETE FROM "UsersDailyValues" WHERE "id" = ? AND "user_id" = ?`,
+      [targetId, req.foodUserId]
+    );
+    if (!result.changes) {
       return res.status(404).json({ error: "Target not found." });
     }
-    await prisma.customTarget.delete({
-      where: { id: existing.id },
-    });
     res.status(204).end();
   })
 );
@@ -2212,10 +2816,18 @@ app.post(
 
     const quantity = parseNumber(req.body.quantity, 1);
     let unit = req.body.unit ? String(req.body.unit).trim() : "";
+    let ingredient = null;
+    let food = null;
+    let recipe = null;
+
     if (ingredientId) {
-      const ingredient = await prisma.ingredient.findFirst({
-        where: { id: ingredientId, userId: req.user.id, deletedAt: null },
+      const { byId } = await fetchFoods({
+        userId: req.foodUserId,
+        ids: [ingredientId],
+        isIngredient: true,
+        includeDeleted: false,
       });
+      ingredient = byId.get(ingredientId) || null;
       if (!ingredient) {
         return res.status(404).json({ error: "Ingredient not found." });
       }
@@ -2233,9 +2845,13 @@ app.post(
     }
 
     if (foodId) {
-      const food = await prisma.food.findFirst({
-        where: { id: foodId, userId: req.user.id, deletedAt: null },
+      const { byId } = await fetchFoods({
+        userId: req.foodUserId,
+        ids: [foodId],
+        isIngredient: false,
+        includeDeleted: false,
       });
+      food = byId.get(foodId) || null;
       if (!food) {
         return res.status(404).json({ error: "Food not found." });
       }
@@ -2249,9 +2865,12 @@ app.post(
     }
 
     if (recipeId) {
-      const recipe = await prisma.recipe.findFirst({
-        where: { id: recipeId, userId: req.user.id, deletedAt: null },
+      const { byId } = await fetchRecipes({
+        userId: req.foodUserId,
+        ids: [recipeId],
+        includeDeleted: false,
       });
+      recipe = byId.get(recipeId) || null;
       if (!recipe) {
         return res.status(404).json({ error: "Recipe not found." });
       }
@@ -2264,27 +2883,36 @@ app.post(
       }
     }
 
-    const entry = await prisma.logEntry.create({
-      data: {
-        ingredientId,
-        foodId,
+    const consumedAt = parseDate(req.body.consumedAt);
+    const entryResult = await foodDb.run(
+      `INSERT INTO "UserIntakeLogs" ("user_id", "food_id", "recipe_id", "quantity", "unit",
+        "logged_at_epoch", "intake_date", "notes")
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        req.foodUserId,
+        ingredientId || foodId,
         recipeId,
         quantity,
         unit,
-        notes: req.body.notes ? String(req.body.notes).trim() : null,
-        consumedAt: parseDate(req.body.consumedAt),
-        userId: req.user.id,
-      },
-      include: {
-        ingredient: true,
-        food: true,
-        recipe: {
-          include: {
-            items: { include: { ingredient: true } },
-          },
-        },
-      },
-    });
+        Math.floor(consumedAt.getTime() / 1000),
+        toIntakeDate(consumedAt),
+        req.body.notes ? String(req.body.notes).trim() : null,
+      ]
+    );
+
+    const entry = {
+      id: entryResult.lastID,
+      ingredientId: ingredientId || null,
+      foodId: foodId || null,
+      recipeId: recipeId || null,
+      quantity,
+      unit,
+      notes: req.body.notes ? String(req.body.notes).trim() : null,
+      consumedAt: consumedAt.getTime(),
+      ingredient,
+      food,
+      recipe,
+    };
 
     res.status(201).json(formatLogEntry(entry));
   })
@@ -2297,10 +2925,11 @@ app.delete(
     if (!Number.isFinite(entryId)) {
       return res.status(400).json({ error: "Invalid log id." });
     }
-    const result = await prisma.logEntry.deleteMany({
-      where: { id: entryId, userId: req.user.id },
-    });
-    if (!result.count) {
+    const result = await foodDb.run(
+      `DELETE FROM "UserIntakeLogs" WHERE "id" = ? AND "user_id" = ?`,
+      [entryId, req.foodUserId]
+    );
+    if (!result.changes) {
       return res.status(404).json({ error: "Log entry not found." });
     }
     res.status(204).end();
@@ -2391,11 +3020,8 @@ app.get("/login.html", (req, res) => res.redirect("/login"));
 app.use(express.static("public", { index: false }));
 
 app.use((error, req, res, next) => {
-  if (error.code === "P2002") {
-    return res.status(409).json({ error: "Duplicate value detected." });
-  }
-  if (error.code === "P2025") {
-    return res.status(404).json({ error: "Record not found." });
+  if (error.code === "SQLITE_CONSTRAINT") {
+    return res.status(409).json({ error: "Constraint violation." });
   }
 
   console.error(error);
@@ -2428,12 +3054,41 @@ const startServer = () => {
   }
 };
 
-const server = startServer();
+let server = null;
 
-const shutdown = async () => {
-  await prisma.$disconnect();
-  server.close(() => process.exit(0));
+const init = async () => {
+  await foodDb.open();
+  await foodDb.initSchema();
+  await authDb.open();
+  await authDb.initSchema();
+  await ensureNutrients();
+  await authDb.deleteExpiredSessions(new Date().toISOString());
+  server = startServer();
 };
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+const shutdown = async () => {
+  try {
+    await authDb.close();
+    await foodDb.close();
+  } catch (error) {
+    console.error(error);
+  }
+  if (server) {
+    server.close(() => process.exit(0));
+  } else {
+    process.exit(0);
+  }
+};
+
+init().catch((error) => {
+  console.error("Failed to start server.");
+  console.error(error);
+  process.exit(1);
+});
+
+process.on("SIGINT", () => {
+  shutdown();
+});
+process.on("SIGTERM", () => {
+  shutdown();
+});

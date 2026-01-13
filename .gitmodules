@@ -1,0 +1,3 @@
+[submodule "external/FoodDatabase"]
+	path = external/FoodDatabase
+	url = git@github.com:ookami125/FoodDatabase.git
