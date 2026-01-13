@@ -593,10 +593,7 @@ const formatEntryTimestamp = (entry) => {
   if (Number.isNaN(consumed.getTime())) {
     return "";
   }
-  const day = entry?.intakeDate
-    ? new Date(`${entry.intakeDate}T00:00:00`)
-    : consumed;
-  const dateLabel = day.toLocaleDateString();
+  const dateLabel = consumed.toLocaleDateString();
   const timeLabel = consumed.toLocaleTimeString([], {
     hour: "numeric",
     minute: "2-digit",
@@ -3507,18 +3504,8 @@ const wireForms = () => {
       };
       const selectedDate = getSelectedDate();
       const now = new Date();
-      const consumedAt = selectedDate
-        ? new Date(
-            selectedDate.getFullYear(),
-            selectedDate.getMonth(),
-            selectedDate.getDate(),
-            now.getHours(),
-            now.getMinutes(),
-            now.getSeconds()
-          )
-        : now;
-      payload.consumedAt = consumedAt.getTime();
-      payload.intakeDate = toDateInputValue(selectedDate || consumedAt);
+      payload.consumedAt = now.getTime();
+      payload.intakeDate = toDateInputValue(selectedDate || now);
 
       if (type === "ingredient") {
         payload.ingredientId = itemId;
