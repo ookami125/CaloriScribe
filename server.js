@@ -1120,11 +1120,45 @@ const lookupNutritionix = async (barcode) => {
 };
 
 const parseDate = (value) => {
-  if (!value) {
+  if (value === null || value === undefined || value === "") {
     return new Date();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return new Date(value);
+  }
+  const asString = String(value).trim();
+  if (asString && /^\d+$/.test(asString)) {
+    const millis = Number(asString);
+    if (Number.isFinite(millis)) {
+      return new Date(millis);
+    }
   }
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+};
+
+const parseIntakeDate = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    return null;
+  }
+  return raw;
 };
 
 const parseDateRange = (value) => {
@@ -1730,6 +1764,8 @@ app.post(
         }
         const quantity = parseNumber(entry?.quantity, 1);
         const consumedAt = parseDate(entry?.consumedAt);
+        const intakeDate =
+          parseIntakeDate(entry?.intakeDate) ?? toIntakeDate(consumedAt);
         let unit = String(entry?.unit || "").trim();
 
         if (mappedFoodId) {
@@ -1769,7 +1805,7 @@ app.post(
             quantity,
             unit,
             Math.floor(consumedAt.getTime() / 1000),
-            toIntakeDate(consumedAt),
+            intakeDate,
             parseOptionalString(entry?.notes),
           ]
         );
@@ -2884,6 +2920,7 @@ app.post(
     }
 
     const consumedAt = parseDate(req.body.consumedAt);
+    const intakeDate = parseIntakeDate(req.body.intakeDate) ?? toIntakeDate(consumedAt);
     const entryResult = await foodDb.run(
       `INSERT INTO "UserIntakeLogs" ("user_id", "food_id", "recipe_id", "quantity", "unit",
         "logged_at_epoch", "intake_date", "notes")
@@ -2895,7 +2932,7 @@ app.post(
         quantity,
         unit,
         Math.floor(consumedAt.getTime() / 1000),
-        toIntakeDate(consumedAt),
+        intakeDate,
         req.body.notes ? String(req.body.notes).trim() : null,
       ]
     );

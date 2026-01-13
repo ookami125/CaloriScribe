@@ -3478,18 +3478,19 @@ const wireForms = () => {
         notes: formData.get("notes"),
       };
       const selectedDate = getSelectedDate();
-      if (selectedDate) {
-        const now = new Date();
-        const consumedAt = new Date(
-          selectedDate.getFullYear(),
-          selectedDate.getMonth(),
-          selectedDate.getDate(),
-          now.getHours(),
-          now.getMinutes(),
-          now.getSeconds()
-        );
-        payload.consumedAt = toLocalDateTimeValue(consumedAt);
-      }
+      const now = new Date();
+      const consumedAt = selectedDate
+        ? new Date(
+            selectedDate.getFullYear(),
+            selectedDate.getMonth(),
+            selectedDate.getDate(),
+            now.getHours(),
+            now.getMinutes(),
+            now.getSeconds()
+          )
+        : now;
+      payload.consumedAt = consumedAt.getTime();
+      payload.intakeDate = toDateInputValue(selectedDate || consumedAt);
 
       if (type === "ingredient") {
         payload.ingredientId = itemId;
