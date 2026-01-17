@@ -1,0 +1,64 @@
+doctype html
+html(lang="en")
+  include partials/head
+  body
+    .ambient
+    include partials/header
+
+    main.page
+      section.panel
+        .panel-header
+          div
+            h2 Daily overview
+            p Macros and calories for your selected day.
+        .hero-grid
+          include partials/calories-panel
+          include partials/macro-split-panel
+      section.panel
+        .panel-header
+          div
+            h1 Log intake
+            p Record meals or single products with full nutrition info.
+        .panel-body.split
+          form#log-form.stacked-card(style="height: fit-content;")
+            h3 Add log entry
+            .toggle(role="radiogroup" aria-label="Log type")
+              label
+                input(type="radio" name="entryType" value="food" checked)
+                | Food
+              label
+                input(type="radio" name="entryType" value="recipe")
+                | Recipe
+              label
+                input(type="radio" name="entryType" value="ingredient")
+                | Ingredient
+            label
+              | Item
+              select#log-item(name="itemId")
+            .grid.two
+              label
+                | Quantity
+                input(type="number" name="quantity" step="0.01" value="1")
+              label
+                | Unit
+                input(type="text" name="unit" placeholder="auto")
+            label
+              | Notes
+              textarea(name="notes" rows="2")
+            button.primary(type="submit") Log intake
+            p.form-status#log-status
+          div
+            .panel-tools
+              .date-controls
+                button.ghost.day-nav(type="button" data-day-action="prev" aria-label="Previous day") Prev
+                label.date-picker
+                  | Day
+                  input#log-date-filter(type="date" data-day-input)
+                button.ghost.day-nav(type="button" data-day-action="next" aria-label="Next day") Next
+                button.ghost(type="button" data-day-action="today") Today
+            .list.scroll#log-list
+
+    include partials/confirm-modal
+    include partials/card-templates
+
+    script(src="/app.js")

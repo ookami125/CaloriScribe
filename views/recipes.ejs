@@ -6,63 +6,16 @@
     <%- include("partials/header", { active, appName }) %>
 
     <main class="page">
-      <section class="panel">
+      <section class="panel" id="recipe-builder-panel">
         <div class="panel-header">
           <div>
             <h2>Daily overview</h2>
-            <p>Calories and macros for the recipe you are building.</p>
+            <p>Today's totals with one serving of this recipe.</p>
           </div>
         </div>
         <div class="hero-grid">
-          <div class="stat-card">
-            <span class="eyebrow">Calories</span>
-            <h2 id="recipe-calories">0</h2>
-            <div class="progress">
-              <div class="progress-bar" id="recipe-calories-progress"></div>
-            </div>
-            <span class="meta" id="recipe-calories-meta">Total recipe</span>
-          </div>
-          <div class="stat-card">
-            <span class="eyebrow">Macro split</span>
-            <div class="macro-grid">
-              <div class="macro-item">
-                <span class="macro-label">Protein</span>
-                <h3 id="recipe-protein">0g</h3>
-                <div class="progress small">
-                  <div
-                    class="progress-bar"
-                    id="recipe-protein-progress"
-                  ></div>
-                </div>
-                <span class="meta" id="recipe-protein-meta">0%</span>
-              </div>
-              <div class="macro-item">
-                <span class="macro-label">Carbs</span>
-                <h3 id="recipe-carbs">0g</h3>
-                <div class="progress small">
-                  <div class="progress-bar" id="recipe-carbs-progress"></div>
-                </div>
-                <span class="meta" id="recipe-carbs-meta">0%</span>
-              </div>
-              <div class="macro-item">
-                <span class="macro-label">Fat</span>
-                <h3 id="recipe-fat">0g</h3>
-                <div class="progress small">
-                  <div class="progress-bar" id="recipe-fat-progress"></div>
-                </div>
-                <span class="meta" id="recipe-fat-meta">0%</span>
-              </div>
-            </div>
-            <div class="custom-targets-section">
-              <div
-                class="macro-grid custom-targets"
-                id="recipe-custom-targets-list"
-              ></div>
-              <p class="meta" id="recipe-custom-targets-empty">
-                Add custom targets in Settings.
-              </p>
-            </div>
-          </div>
+          <%- include("partials/calories-panel") %>
+          <%- include("partials/macro-split-panel") %>
         </div>
       </section>
       <section class="panel">
@@ -73,8 +26,8 @@
           </div>
         </div>
         <div class="panel-body split">
-          <form id="recipe-form" class="stacked-card">
-            <h3>Create recipe</h3>
+          <form id="recipe-form" class="stacked-card" style="height: fit-content;">
+            <h3 id="recipe-form-title">Create recipe</h3>
             <div class="grid two">
               <label>
                 Recipe name
@@ -90,21 +43,88 @@
               <textarea name="notes" rows="3"></textarea>
             </label>
             <div class="recipe-items" id="recipe-items"></div>
-            <button class="ghost" type="button" id="add-recipe-item">
-              Add ingredient
+            <div class="form-actions">
+              <button class="ghost" type="button" id="add-recipe-item">
+                Find ingredient
+              </button>
+              <button class="ghost" type="button" id="recipe-cancel" hidden>
+                Cancel edit
+              </button>
+            </div>
+            <button class="primary" type="submit" id="recipe-submit">
+              Create recipe
             </button>
-            <button class="primary" type="submit">Save recipe</button>
             <p class="form-status" id="recipe-status"></p>
           </form>
-          <div>
-            <div class="list scroll" id="recipe-list"></div>
+          <div class="recipe-side">
+            <div class="panel-tabs" role="tablist" aria-label="Recipe panels">
+              <button
+                class="tab-button is-active"
+                type="button"
+                data-recipe-panel="recipes"
+                id="recipe-panel-recipes"
+              >
+                Recipes
+              </button>
+              <button
+                class="tab-button"
+                type="button"
+                data-recipe-panel="ingredients"
+                id="recipe-panel-ingredients"
+              >
+                Ingredients
+              </button>
+            </div>
+            <div id="recipe-list-panel">
+              <div class="list scroll" id="recipe-list"></div>
+            </div>
+            <div id="recipe-ingredients-panel" hidden>
+              <div class="stacked-card">
+                <h3>Ingredient library</h3>
+                <label>
+                  Search name or barcode
+                  <div class="field-row">
+                    <input
+                      name="recipe-ingredient-search"
+                      id="recipe-ingredient-search"
+                      type="search"
+                      placeholder="e.g. oats or 0123456789"
+                    />
+                    <button
+                      class="ghost"
+                      type="button"
+                      data-scan-trigger
+                      data-scan-target="recipe-ingredient"
+                    >
+                      Scan barcode
+                    </button>
+                  </div>
+                </label>
+              </div>
+              <div class="list scroll" id="recipe-ingredient-list"></div>
+            </div>
           </div>
         </div>
       </section>
     </main>
 
+    <div class="modal" id="scan-modal" aria-hidden="true">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>Scan barcode</h3>
+          <button class="ghost" id="close-scan">Close</button>
+        </div>
+        <div class="scan-area">
+          <video id="scan-video" autoplay playsinline></video>
+          <div class="scan-target"></div>
+        </div>
+        <p class="form-status" id="scan-status"></p>
+      </div>
+    </div>
+
     <%- include("partials/confirm-modal") %>
 
+    <script src="https://unpkg.com/@zxing/library@0.21.2/umd/index.min.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

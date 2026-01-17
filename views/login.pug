@@ -1,0 +1,27 @@
+doctype html
+html(lang="en")
+  include partials/head
+  body
+    .ambient
+
+    main.page
+      section.panel
+        .panel-header
+          div
+            p.eyebrow Welcome back
+            h1.brand-title
+              img.brand-icon(src="/favicons/favicon-32x32.png" alt="" aria-hidden="true")
+              span= appName
+            p Sign in to access your dashboard.
+        .panel-body
+          form#login-form.stacked-card
+            label
+              | Username
+              input(type="text" name="username" autocomplete="username" required)
+            label
+              | Password
+              input(type="password" name="password" autocomplete="current-password" required)
+            button.primary(type="submit") Sign in
+            p.form-status#login-status
+
+    script(src="/login.js")

@@ -1,0 +1,11 @@
+.modal#edit-target-modal(aria-hidden="true")
+  .modal-card(role="dialog" aria-modal="true" aria-labelledby="edit-target-title")
+    .modal-header
+      h3#edit-target-title Edit target name
+      button.ghost#edit-target-close(type="button") Close
+    label
+      | Name
+      input#edit-target-input(type="text" required)
+    .modal-actions
+      button.primary#edit-target-save(type="button") Save
+      button.ghost#edit-target-cancel(type="button") Cancel

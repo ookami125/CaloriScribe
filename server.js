@@ -71,7 +71,7 @@ const authDb = new AuthDatabase({
   filename: resolveSqlitePath(process.env.AUTH_DATABASE_URL, "auth.db"),
 });
 
-app.set("view engine", "ejs");
+app.set("view engine", "pug");
 app.set("views", path.join(__dirname, "views"));
 
 app.use(express.json({ limit: "10mb" }));
@@ -2122,6 +2122,26 @@ app.delete(
     if (!Number.isFinite(ingredientId)) {
       return res.status(400).json({ error: "Invalid ingredient id." });
     }
+    const hardDelete =
+      String(req.query.mode || "").toLowerCase() === "hard" ||
+      String(req.query.hard || "").toLowerCase() === "true";
+    if (hardDelete) {
+      const existing = await foodDb.getFoodForUser({
+        foodId: ingredientId,
+        userId: req.foodUserId,
+        isIngredient: true,
+        includeDeleted: true,
+      });
+      if (!existing) {
+        return res.status(404).json({ error: "Ingredient not found." });
+      }
+      await foodDb.deleteUserIntakeLogsByFoodId({
+        userId: req.foodUserId,
+        foodId: ingredientId,
+      });
+      await foodDb.hardDeleteFood(ingredientId);
+      return res.status(204).end();
+    }
     const result = await foodDb.softDeleteFoodForUser({
       foodId: ingredientId,
       userId: req.foodUserId,
@@ -2306,6 +2326,26 @@ app.delete(
     if (!Number.isFinite(foodId)) {
       return res.status(400).json({ error: "Invalid food id." });
     }
+    const hardDelete =
+      String(req.query.mode || "").toLowerCase() === "hard" ||
+      String(req.query.hard || "").toLowerCase() === "true";
+    if (hardDelete) {
+      const existing = await foodDb.getFoodForUser({
+        foodId,
+        userId: req.foodUserId,
+        isIngredient: false,
+        includeDeleted: true,
+      });
+      if (!existing) {
+        return res.status(404).json({ error: "Food not found." });
+      }
+      await foodDb.deleteUserIntakeLogsByFoodId({
+        userId: req.foodUserId,
+        foodId,
+      });
+      await foodDb.hardDeleteFood(foodId);
+      return res.status(204).end();
+    }
     const result = await foodDb.softDeleteFoodForUser({
       foodId,
       userId: req.foodUserId,
@@ -2477,6 +2517,25 @@ app.delete(
     const recipeId = Number(req.params.id);
     if (!Number.isFinite(recipeId)) {
       return res.status(400).json({ error: "Invalid recipe id." });
+    }
+    const hardDelete =
+      String(req.query.mode || "").toLowerCase() === "hard" ||
+      String(req.query.hard || "").toLowerCase() === "true";
+    if (hardDelete) {
+      const existing = await foodDb.getRecipeForUser({
+        recipeId,
+        userId: req.foodUserId,
+        includeDeleted: true,
+      });
+      if (!existing) {
+        return res.status(404).json({ error: "Recipe not found." });
+      }
+      await foodDb.deleteUserIntakeLogsByRecipeId({
+        userId: req.foodUserId,
+        recipeId,
+      });
+      await foodDb.hardDeleteRecipe(recipeId);
+      return res.status(204).end();
     }
     const result = await foodDb.softDeleteRecipeForUser({
       recipeId,

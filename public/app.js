@@ -3,8 +3,8 @@ const state = {
   foods: [],
   recipes: [],
   logs: [],
-  targets: null,
   customTargets: [],
+  targetLookup: new Map(),
   logImpact: null,
 };
 
@@ -12,6 +12,7 @@ const qs = (selector, scope = document) => scope.querySelector(selector);
 const qsa = (selector, scope = document) =>
   Array.from(scope.querySelectorAll(selector));
 
+// FIXME: Some of this looks non-generic.
 const elements = {
   ingredientList: qs("#ingredient-list"),
   ingredientForm: qs("#ingredient-form"),
@@ -40,52 +41,25 @@ const elements = {
   foodExtraNutrients: qs("#food-extra-nutrients"),
   addFoodNutrient: qs("#add-food-nutrient"),
   recipeForm: qs("#recipe-form"),
+  recipeFormTitle: qs("#recipe-form-title"),
+  recipeSubmit: qs("#recipe-submit"),
+  recipeCancel: qs("#recipe-cancel"),
   recipeItems: qs("#recipe-items"),
   recipeStatus: qs("#recipe-status"),
   recipeList: qs("#recipe-list"),
+  recipeListPanel: qs("#recipe-list-panel"),
+  recipeIngredientsPanel: qs("#recipe-ingredients-panel"),
+  recipePanelRecipes: qs("#recipe-panel-recipes"),
+  recipePanelIngredients: qs("#recipe-panel-ingredients"),
+  recipeIngredientSearch: qs("#recipe-ingredient-search"),
+  recipeIngredientList: qs("#recipe-ingredient-list"),
   addRecipeItem: qs("#add-recipe-item"),
-  recipeCalories: qs("#recipe-calories"),
-  recipeCaloriesMeta: qs("#recipe-calories-meta"),
-  recipeProtein: qs("#recipe-protein"),
-  recipeCarbs: qs("#recipe-carbs"),
-  recipeFat: qs("#recipe-fat"),
-  recipeCaloriesProgress: qs("#recipe-calories-progress"),
-  recipeProteinProgress: qs("#recipe-protein-progress"),
-  recipeCarbsProgress: qs("#recipe-carbs-progress"),
-  recipeFatProgress: qs("#recipe-fat-progress"),
-  recipeProteinMeta: qs("#recipe-protein-meta"),
-  recipeCarbsMeta: qs("#recipe-carbs-meta"),
-  recipeFatMeta: qs("#recipe-fat-meta"),
-  recipeCustomTargetsList: qs("#recipe-custom-targets-list"),
-  recipeCustomTargetsEmpty: qs("#recipe-custom-targets-empty"),
   logForm: qs("#log-form"),
   logItem: qs("#log-item"),
   logStatus: qs("#log-status"),
   logList: qs("#log-list"),
   customTargetsList: qs("#custom-targets-list"),
   customTargetsEmpty: qs("#custom-targets-empty"),
-  logImpactCard: qs("#log-impact-card"),
-  logImpactCalories: qs("#log-impact-calories"),
-  logImpactProtein: qs("#log-impact-protein"),
-  logImpactCarbs: qs("#log-impact-carbs"),
-  logImpactFat: qs("#log-impact-fat"),
-  logImpactNote: qs("#log-impact-note"),
-  todayCalories: qs("#today-calories"),
-  todayProtein: qs("#today-protein"),
-  todayCarbs: qs("#today-carbs"),
-  todayFat: qs("#today-fat"),
-  caloriesProgress: qs("#calories-progress"),
-  caloriesImpactProgress: qs("#calories-impact-progress"),
-  proteinProgress: qs("#protein-progress"),
-  proteinImpactProgress: qs("#protein-impact-progress"),
-  carbsProgress: qs("#carbs-progress"),
-  carbsImpactProgress: qs("#carbs-impact-progress"),
-  fatProgress: qs("#fat-progress"),
-  fatImpactProgress: qs("#fat-impact-progress"),
-  caloriesTarget: qs("#calories-target"),
-  proteinTarget: qs("#protein-target"),
-  carbsTarget: qs("#carbs-target"),
-  fatTarget: qs("#fat-target"),
   targetForm: qs("#target-form"),
   targetStatus: qs("#target-status"),
   customTargetForm: qs("#custom-target-form"),
@@ -123,21 +97,10 @@ const elements = {
 
 let editingIngredientId = null;
 let editingFoodId = null;
+let editingRecipeId = null;
+let recipePanelMode = "recipes";
 
-const EXTRA_NUTRIENTS = [
-  { name: "saturatedFat", label: "Saturated fat (g)", step: "0.01" },
-  { name: "transFat", label: "Trans fat (g)", step: "0.01" },
-  { name: "cholesterolMg", label: "Cholesterol (mg)", step: "0.01" },
-  { name: "sodiumMg", label: "Sodium (mg)", step: "0.01" },
-  { name: "dietaryFiber", label: "Dietary fiber (g)", step: "0.01" },
-  { name: "totalSugars", label: "Total sugars (g)", step: "0.01" },
-  { name: "addedSugars", label: "Added sugars (g)", step: "0.01" },
-  { name: "vitaminDMcg", label: "Vitamin D (mcg)", step: "0.01" },
-  { name: "calciumMg", label: "Calcium (mg)", step: "0.01" },
-  { name: "ironMg", label: "Iron (mg)", step: "0.01" },
-  { name: "potassiumMg", label: "Potassium (mg)", step: "0.01" },
-];
-
+// FIXME: This should all come from the FoodDB.
 const CUSTOM_TARGET_OPTIONS = [
   { key: "saturatedFat", label: "Saturated fat", unit: "g" },
   { key: "transFat", label: "Trans fat", unit: "g" },
@@ -151,24 +114,161 @@ const CUSTOM_TARGET_OPTIONS = [
   { key: "ironMg", label: "Iron", unit: "mg" },
   { key: "potassiumMg", label: "Potassium", unit: "mg" },
 ];
-const CORE_TARGET_OPTIONS = [
-  { key: "calories", label: "Calories", unit: "cal" },
-  { key: "protein", label: "Protein", unit: "g" },
-  { key: "carbs", label: "Carbs", unit: "g" },
-  { key: "fat", label: "Fat", unit: "g" },
-];
-const CORE_TARGET_KEYS = new Set(
-  CORE_TARGET_OPTIONS.map((option) => option.key)
-);
-const CORE_TARGET_LOOKUP = new Map(
-  CORE_TARGET_OPTIONS.map((option) => [option.key, option])
-);
 const DEFAULT_CUSTOM_TARGET_VALUE = 1;
 const CUSTOM_TARGET_LOOKUP = new Map(
   CUSTOM_TARGET_OPTIONS.map((option) => [option.key, option])
 );
 
+const formatNutrientLabel = (label, unit) =>
+  unit ? `${label} (${unit})` : label;
+const getExtraNutrientOptions = () => {
+  const targets = new Map(
+    (state.customTargets || []).map((target) => [target.key, target])
+  );
+  return CUSTOM_TARGET_OPTIONS.map((option) => {
+    const target = targets.get(option.key);
+    const label = target?.label || option.label;
+    const unit = target?.unit || option.unit;
+    return {
+      name: option.key,
+      label: formatNutrientLabel(label, unit),
+    };
+  });
+};
+
 const DAY_STORAGE_KEY = "nutritionTrackerSelectedDay";
+const getTargetLookup = () => state.targetLookup || new Map();
+const getTargetData = (key) => getTargetLookup().get(key) || null;
+const getTargetLabel = (key) => {
+  const target = getTargetData(key);
+  if (target?.label) {
+    return target.label;
+  }
+  return CUSTOM_TARGET_LOOKUP.get(key)?.label || key;
+};
+const getTargetUnit = (key) => {
+  const target = getTargetData(key);
+  if (target?.unit) {
+    return target.unit;
+  }
+  return CUSTOM_TARGET_LOOKUP.get(key)?.unit || "";
+};
+const getTargetValue = (key) => getTargetData(key)?.target ?? null;
+const getTargetAllowOver = (key) => Boolean(getTargetData(key)?.allowOver);
+const getTrackedTargetKeys = () =>
+  (state.customTargets || []).map((target) => target.key);
+const isOptionalTargetKey = (key) => !CUSTOM_TARGET_LOOKUP.has(key);
+const getPrecisionForUnit = (unit) => {
+  const normalized = String(unit || "").toLowerCase();
+  return normalized === "cal" || normalized === "kcal" ? 0 : 1;
+};
+const formatNutrientValue = (value, unit) =>
+  formatNumber(value, getPrecisionForUnit(unit));
+const formatNutrientDisplay = (value, unit) => {
+  const formatted = formatNutrientValue(value, unit);
+  if (!unit) {
+    return formatted;
+  }
+  if (unit.startsWith(" ")) {
+    return `${formatted}${unit}`;
+  }
+  const spacer = unit.length > 1 ? " " : "";
+  return `${formatted}${spacer}${unit}`;
+};
+const getTargetKeyFromId = (id, prefix = "", suffix = "") => {
+  if (!id || !id.startsWith(prefix)) {
+    return null;
+  }
+  if (suffix && !id.endsWith(suffix)) {
+    return null;
+  }
+  const start = prefix.length;
+  const end = suffix ? -suffix.length : undefined;
+  const key = id.slice(start, end);
+  return key || null;
+};
+const getTargetKeysFromSelector = (selector, prefix = "", suffix = "") => {
+  const keys = [];
+  qsa(selector).forEach((element) => {
+    const key = getTargetKeyFromId(element.id, prefix, suffix);
+    if (key && !keys.includes(key)) {
+      keys.push(key);
+    }
+  });
+  return keys;
+};
+const getTargetElementMap = (selector, prefix = "", suffix = "") => {
+  const map = new Map();
+  qsa(selector).forEach((element) => {
+    const key = getTargetKeyFromId(element.id, prefix, suffix);
+    if (key) {
+      map.set(key, element);
+    }
+  });
+  return map;
+};
+const getElementUnitSuffix = (element, fallbackUnit = "") => {
+  if (!element) {
+    return fallbackUnit;
+  }
+  if (element.dataset.unitSuffix !== undefined) {
+    return element.dataset.unitSuffix;
+  }
+  const text = String(element.textContent || "");
+  const match = text.match(/(\s*[a-zA-Z]+)$/);
+  const suffix = match ? match[1] : "";
+  element.dataset.unitSuffix = suffix;
+  return element.dataset.unitSuffix || fallbackUnit;
+};
+const getElementFallbackText = (element) => {
+  if (!element) {
+    return "";
+  }
+  if (element.dataset.fallbackText !== undefined) {
+    return element.dataset.fallbackText;
+  }
+  element.dataset.fallbackText = element.textContent || "";
+  return element.dataset.fallbackText;
+};
+const getPrimaryTargetKeys = () => {
+  const keys = [];
+  const addKeys = (list) => {
+    list.forEach((key) => {
+      if (!keys.includes(key)) {
+        keys.push(key);
+      }
+    });
+  };
+  addKeys(getTargetKeysFromSelector("[id^='today-']", "today-"));
+  addKeys(
+    getTargetKeysFromSelector(
+      "[id$='-progress']:not([id^='recipe-'])",
+      "",
+      "-progress"
+    )
+  );
+  addKeys(
+    getTargetKeysFromSelector(
+      "[id^='recipe-'][id$='-progress']",
+      "recipe-",
+      "-progress"
+    )
+  );
+  addKeys(getTargetKeysFromSelector("[id^='log-impact-']", "log-impact-"));
+  if (keys.length) {
+    return keys;
+  }
+  return (state.customTargets || [])
+    .map((target) => target.key)
+    .filter((key) => isOptionalTargetKey(key));
+};
+const getPrimaryTargetKeySet = () => new Set(getPrimaryTargetKeys());
+const getSecondaryTargets = () => {
+  const primaryKeys = getPrimaryTargetKeySet();
+  return (state.customTargets || []).filter(
+    (target) => !primaryKeys.has(target.key)
+  );
+};
 const setupEditButton = (button, label = "Edit name") => {
   button.className = "icon-button edit-button";
   const icon = document.createElement("span");
@@ -188,6 +288,17 @@ const setupDeleteButton = (button, options = {}) => {
   icon.setAttribute("aria-hidden", "true");
   button.replaceChildren(icon);
   const label = options.label || "Delete";
+  button.setAttribute("aria-label", label);
+  button.title = label;
+};
+
+const setupArchiveButton = (button, options = {}) => {
+  button.className = "icon-button archive-button";
+  const icon = document.createElement("span");
+  icon.className = "icon-mask";
+  icon.setAttribute("aria-hidden", "true");
+  button.replaceChildren(icon);
+  const label = options.label || "Archive";
   button.setAttribute("aria-label", label);
   button.title = label;
 };
@@ -240,7 +351,8 @@ const setActionStatus = (element, message, tone = "") => {
 const confirmDialog = ({
   title = "Confirm action",
   message = "Are you sure?",
-  confirmText = "Delete",
+  confirmText = "Confirm",
+  confirmTone = "primary",
   cancelText = "Cancel",
 } = {}) => {
   const modal = elements.confirmModal;
@@ -261,6 +373,12 @@ const confirmDialog = ({
     messageEl.textContent = message;
   }
   acceptButton.textContent = confirmText;
+  if (acceptButton) {
+    acceptButton.classList.remove("primary", "danger", "ghost");
+    if (confirmTone) {
+      acceptButton.classList.add(confirmTone);
+    }
+  }
   cancelButton.textContent = cancelText;
   if (closeButton) {
     closeButton.textContent = "Close";
@@ -318,12 +436,63 @@ const confirmDialog = ({
 
 const closeCardMenus = () => {
   qsa(".card-menu.open").forEach((menu) => {
+    if (typeof menu._closeMenu === "function") {
+      menu._closeMenu();
+      return;
+    }
     menu.classList.remove("open");
     const button = menu.querySelector(".menu-button");
     if (button) {
       button.setAttribute("aria-expanded", "false");
     }
   });
+};
+
+const positionCardMenu = (wrapper, panel) => {
+  if (!wrapper || !panel) {
+    return;
+  }
+  const rect = wrapper.getBoundingClientRect();
+  const panelRect = panel.getBoundingClientRect();
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+  const margin = 12;
+  const offset = 8;
+
+  let top = rect.bottom + offset;
+  let left = rect.right - panelRect.width;
+
+  if (left < margin) {
+    left = margin;
+  }
+  if (left + panelRect.width > viewportWidth - margin) {
+    left = Math.max(margin, viewportWidth - panelRect.width - margin);
+  }
+
+  panel.style.maxHeight = "";
+  panel.style.overflowY = "";
+
+  if (top + panelRect.height > viewportHeight - margin) {
+    const aboveTop = rect.top - panelRect.height - offset;
+    if (aboveTop >= margin) {
+      top = aboveTop;
+    } else {
+      const spaceBelow = viewportHeight - rect.bottom - margin - offset;
+      const spaceAbove = rect.top - margin - offset;
+      if (spaceAbove > spaceBelow) {
+        top = margin;
+        panel.style.maxHeight = `${Math.max(spaceAbove, 120)}px`;
+        panel.style.overflowY = "auto";
+      } else {
+        top = rect.bottom + offset;
+        panel.style.maxHeight = `${Math.max(spaceBelow, 120)}px`;
+        panel.style.overflowY = "auto";
+      }
+    }
+  }
+
+  panel.style.top = `${Math.max(margin, top)}px`;
+  panel.style.left = `${Math.max(margin, left)}px`;
 };
 
 const createCardMenu = (items) => {
@@ -363,6 +532,23 @@ const createCardMenu = (items) => {
     panel.appendChild(entry);
   });
 
+  const handleReposition = () => positionCardMenu(wrapper, panel);
+  const cleanup = () => {
+    window.removeEventListener("resize", handleReposition);
+    document.removeEventListener("scroll", handleReposition, true);
+    wrapper._menuCleanup = null;
+  };
+  const closeMenu = () => {
+    wrapper.classList.remove("open");
+    button.setAttribute("aria-expanded", "false");
+    panel.classList.remove("open");
+    if (panel.isConnected) {
+      panel.remove();
+    }
+    cleanup();
+  };
+  wrapper._closeMenu = closeMenu;
+
   button.addEventListener("click", (event) => {
     event.stopPropagation();
     const isOpen = wrapper.classList.contains("open");
@@ -370,15 +556,149 @@ const createCardMenu = (items) => {
     if (!isOpen) {
       wrapper.classList.add("open");
       button.setAttribute("aria-expanded", "true");
+      if (!panel.isConnected) {
+        document.body.appendChild(panel);
+      }
+      panel.classList.add("open");
+      panel.style.visibility = "hidden";
+      panel.style.pointerEvents = "none";
+      requestAnimationFrame(() => {
+        positionCardMenu(wrapper, panel);
+        panel.style.visibility = "";
+        panel.style.pointerEvents = "";
+      });
+      window.addEventListener("resize", handleReposition);
+      document.addEventListener("scroll", handleReposition, true);
+      wrapper._menuCleanup = cleanup;
     }
   });
 
-  wrapper.addEventListener("click", (event) => {
+  panel.addEventListener("click", (event) => {
     event.stopPropagation();
   });
 
-  wrapper.append(button, panel);
+  wrapper.append(button);
   return wrapper;
+};
+
+const cloneTemplate = (selector) => {
+  const template = qs(selector);
+  if (!template || !template.content) {
+    return null;
+  }
+  const node = template.content.firstElementChild;
+  return node ? node.cloneNode(true) : null;
+};
+
+const buildListCard = ({
+  title = "",
+  metaLines = [],
+  menuItems = [],
+  actions = [],
+  details = null,
+  className = "",
+} = {}) => {
+  const card = cloneTemplate("#list-card-template") || document.createElement("div");
+  if (!card.classList.contains("list-card")) {
+    card.classList.add("list-card");
+  }
+  if (className) {
+    className
+      .split(" ")
+      .filter(Boolean)
+      .forEach((token) => card.classList.add(token));
+  }
+
+  let titleEl = card.querySelector("[data-card-title]") || card.querySelector("h4");
+  if (!titleEl) {
+    titleEl = document.createElement("h4");
+    card.appendChild(titleEl);
+  }
+  if (titleEl) {
+    titleEl.textContent = title;
+  }
+
+  const metas = (metaLines || []).filter(Boolean);
+  const metaContainer = card.querySelector("[data-card-meta-container]");
+  if (metaContainer) {
+    const metaTemplate =
+      metaContainer.querySelector("[data-card-meta-line]") ||
+      document.createElement("div");
+    metaTemplate.classList.add("meta");
+    metaContainer.innerHTML = "";
+    if (metas.length) {
+      metas.forEach((line) => {
+        const meta = metaTemplate.cloneNode(true);
+        meta.removeAttribute("data-card-meta-line");
+        meta.textContent = line;
+        metaContainer.appendChild(meta);
+      });
+    } else {
+      metaContainer.remove();
+    }
+  } else if (metas.length) {
+    metas.forEach((line) => {
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = line;
+      card.appendChild(meta);
+    });
+  }
+
+  const actionsContainer = card.querySelector("[data-card-actions]");
+  if (actionsContainer) {
+    actionsContainer.innerHTML = "";
+    if (actions.length) {
+      actions.forEach((action) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = action.className || "ghost";
+        button.textContent = action.label;
+        button.addEventListener("click", action.onClick);
+        actionsContainer.appendChild(button);
+      });
+    } else {
+      actionsContainer.remove();
+    }
+  } else if (actions.length) {
+    const actionsEl = document.createElement("div");
+    actionsEl.className = "actions";
+    actions.forEach((action) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = action.className || "ghost";
+      button.textContent = action.label;
+      button.addEventListener("click", action.onClick);
+      actionsEl.appendChild(button);
+    });
+    card.appendChild(actionsEl);
+  }
+
+  const menuSlot = card.querySelector("[data-card-menu]");
+  if (menuItems && menuItems.length) {
+    card.classList.add("has-menu");
+    const menu = createCardMenu(menuItems);
+    if (menuSlot) {
+      menuSlot.appendChild(menu);
+    } else {
+      card.appendChild(menu);
+    }
+  } else if (menuSlot) {
+    menuSlot.remove();
+  }
+
+  const detailsSlot = card.querySelector("[data-card-details]");
+  if (details) {
+    if (detailsSlot) {
+      detailsSlot.appendChild(details);
+    } else {
+      card.appendChild(details);
+    }
+  } else if (detailsSlot) {
+    detailsSlot.remove();
+  }
+
+  return card;
 };
 
 const editTargetDialog = (target) => {
@@ -474,6 +794,95 @@ const parseNumeric = (value, fallback = 0) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const createTotals = (keys) =>
+  keys.reduce((acc, key) => {
+    acc[key] = 0;
+    return acc;
+  }, {});
+
+const addTotals = (totals, source, multiplier, keys) => {
+  keys.forEach((key) => {
+    totals[key] += parseNumeric(source?.[key], 0) * multiplier;
+  });
+};
+
+const buildPrimarySummaryText = (nutrition) => {
+  const keys = getPrimaryTargetKeys();
+  if (!keys.length) {
+    return "";
+  }
+  return keys
+    .map((key) => {
+      const value = parseNumeric(nutrition?.[key], 0);
+      const unit = getTargetUnit(key);
+      const label = getTargetLabel(key);
+      return `${label}: ${formatNutrientDisplay(value, unit)}`.trim();
+    })
+    .join(", ");
+};
+
+const buildNutritionDetailEntries = (nutrition) => {
+  return (state.customTargets || []).map((target) => {
+    const unit = getTargetUnit(target.key);
+    const label = getTargetLabel(target.key);
+    const value = parseNumeric(nutrition?.[target.key], 0);
+    return {
+      label,
+      value: `${formatNutrientDisplay(value, unit)}`.trim(),
+    };
+  });
+};
+
+const buildExtraFactEntries = (item) =>
+  getSecondaryTargets().reduce((entries, target) => {
+    const value = item?.[target.key];
+    if (value === null || value === undefined) {
+      return entries;
+    }
+    const label = getTargetLabel(target.key);
+    const unit = getTargetUnit(target.key);
+    entries.push({
+      label,
+      value: `${formatNutrientDisplay(value, unit)}`.trim(),
+    });
+    return entries;
+  }, []);
+
+const LIBRARY_FIELD_KEYS = [
+  "name",
+  "barcode",
+  "unit",
+  "ingredientsList",
+  "vitamins",
+  "allergens",
+  "servingSize",
+  "servingsPerContainer",
+];
+
+const applyLibraryFieldValues = (setter, data, options = {}) => {
+  LIBRARY_FIELD_KEYS.forEach((field) => {
+    setter(field, data?.[field], options);
+  });
+  const targetKeys = getTrackedTargetKeys();
+  if (targetKeys.length) {
+    targetKeys.forEach((key) => {
+      setter(key, data?.[key], options);
+    });
+    return;
+  }
+  Object.keys(data || {}).forEach((key) => {
+    if (typeof data?.[key] === "number") {
+      setter(key, data?.[key], options);
+    }
+  });
+};
+
+const buildExtraNutrientValues = (data) =>
+  CUSTOM_TARGET_OPTIONS.reduce((values, option) => {
+    values[option.key] = data?.[option.key];
+    return values;
+  }, {});
+
 const parseTargetInput = (value) => {
   const raw = String(value ?? "").trim();
   if (!raw) {
@@ -499,63 +908,17 @@ const formatTargetInputValue = (value, allowOver) => {
   return allowOver ? `${base}+` : base;
 };
 
-const isCoreTargetKey = (key) => CORE_TARGET_KEYS.has(key);
-
-const getCoreTargetOption = (key) => CORE_TARGET_LOOKUP.get(key) || null;
-
-const getCustomTargetOption = (key) =>
-  CUSTOM_TARGET_LOOKUP.get(key) || null;
-
-const getTargetOption = (key) =>
-  getCustomTargetOption(key) || getCoreTargetOption(key);
-
-const getCustomTargetData = (key) =>
-  (state.customTargets || []).find((target) => target.key === key) || null;
-
-const getCustomTargetLabel = (key) => {
-  const target = getCustomTargetData(key);
-  if (target?.label) {
-    return target.label;
-  }
-  const option = getTargetOption(key);
-  return option?.label || key;
-};
-
-const getCustomTargetUnit = (key) => {
-  const target = getCustomTargetData(key);
-  if (target?.unit) {
-    return target.unit;
-  }
-  const option = getTargetOption(key);
-  return option?.unit || "";
-};
-
-const deriveCoreTargets = (customTargets = []) => {
-  const targetMap = new Map(customTargets.map((target) => [target.key, target]));
-  const read = (key) => targetMap.get(key) || {};
-  return {
-    calories: read("calories").target ?? null,
-    protein: read("protein").target ?? null,
-    carbs: read("carbs").target ?? null,
-    fat: read("fat").target ?? null,
-    caloriesAllowOver: Boolean(read("calories").allowOver),
-    proteinAllowOver: Boolean(read("protein").allowOver),
-    carbsAllowOver: Boolean(read("carbs").allowOver),
-    fatAllowOver: Boolean(read("fat").allowOver),
-  };
-};
+const getCatalogTargetOption = (key) => CUSTOM_TARGET_LOOKUP.get(key) || null;
 
 const getAvailableTargetOptions = () => {
   const existingKeys = new Set(
     (state.customTargets || []).map((target) => target.key)
   );
-  return [...CORE_TARGET_OPTIONS, ...CUSTOM_TARGET_OPTIONS].filter(
-    (option) => !existingKeys.has(option.key)
-  );
+  return CUSTOM_TARGET_OPTIONS.filter((option) => !existingKeys.has(option.key));
 };
 
 const setCustomTargetUnit = (key) => {
-  const option = getTargetOption(key);
+  const option = getCatalogTargetOption(key);
   if (elements.customTargetUnit) {
     elements.customTargetUnit.textContent = option?.unit || "";
   }
@@ -967,7 +1330,7 @@ const buildDetails = (title, entries, options = {}) => {
 };
 
 const getExtraConfig = (name) =>
-  EXTRA_NUTRIENTS.find((nutrient) => nutrient.name === name);
+  getExtraNutrientOptions().find((nutrient) => nutrient.name === name);
 
 const updateExtraNutrientSelect = () => {
   if (!elements.extraNutrientSelect || !elements.extraNutrients) {
@@ -985,14 +1348,14 @@ const updateExtraNutrientSelect = () => {
   placeholder.textContent = "Select a nutrient";
   elements.extraNutrientSelect.appendChild(placeholder);
 
-  EXTRA_NUTRIENTS.filter((nutrient) => !existing.has(nutrient.name)).forEach(
-    (nutrient) => {
+  getExtraNutrientOptions()
+    .filter((nutrient) => !existing.has(nutrient.name))
+    .forEach((nutrient) => {
       const option = document.createElement("option");
       option.value = nutrient.name;
       option.textContent = nutrient.label;
       elements.extraNutrientSelect.appendChild(option);
-    }
-  );
+    });
 
   elements.extraNutrientSelect.disabled =
     elements.extraNutrientSelect.options.length === 1;
@@ -1030,7 +1393,7 @@ const createExtraField = (name, value = "") => {
   const input = document.createElement("input");
   input.name = config.name;
   input.type = "number";
-  input.step = config.step || "0.01";
+  input.step = config.step || "1";
   input.value = value ?? "";
 
   label.appendChild(input);
@@ -1077,14 +1440,14 @@ const updateFoodExtraNutrientSelect = () => {
   placeholder.textContent = "Select a nutrient";
   elements.foodExtraNutrientSelect.appendChild(placeholder);
 
-  EXTRA_NUTRIENTS.filter((nutrient) => !existing.has(nutrient.name)).forEach(
-    (nutrient) => {
+  getExtraNutrientOptions()
+    .filter((nutrient) => !existing.has(nutrient.name))
+    .forEach((nutrient) => {
       const option = document.createElement("option");
       option.value = nutrient.name;
       option.textContent = nutrient.label;
       elements.foodExtraNutrientSelect.appendChild(option);
-    }
-  );
+    });
 
   elements.foodExtraNutrientSelect.disabled =
     elements.foodExtraNutrientSelect.options.length === 1;
@@ -1123,7 +1486,7 @@ const createFoodExtraField = (name, value = "") => {
   const input = document.createElement("input");
   input.name = config.name;
   input.type = "number";
-  input.step = config.step || "0.01";
+  input.step = config.step || "1";
   input.value = value ?? "";
 
   label.appendChild(input);
@@ -1178,23 +1541,11 @@ const renderIngredients = () => {
   }
 
   items.forEach((ingredient) => {
-    const card = document.createElement("div");
-    card.className = "list-card";
-
-    const title = document.createElement("h4");
-    title.textContent = ingredient.name;
-
-    const summary = document.createElement("div");
-    summary.className = "meta";
-    summary.textContent = `${formatNumber(ingredient.calories)} cal, ${formatNumber(
-      ingredient.protein
-    )}p, ${formatNumber(ingredient.carbs)}c, ${formatNumber(
-      ingredient.fat
-    )}f per ${ingredient.unit}`;
-
-    const barcode = document.createElement("div");
-    barcode.className = "meta";
-    barcode.textContent = ingredient.barcode
+    const summaryLine = buildPrimarySummaryText(ingredient);
+    const summaryText = summaryLine
+      ? `${summaryLine} per ${ingredient.unit}`
+      : `Per ${ingredient.unit}`;
+    const barcodeText = ingredient.barcode
       ? `Barcode: ${ingredient.barcode}`
       : "Barcode: none";
 
@@ -1230,29 +1581,7 @@ const renderIngredients = () => {
       });
     }
 
-    const extraFacts = [
-      ["Saturated fat", ingredient.saturatedFat, "g"],
-      ["Trans fat", ingredient.transFat, "g"],
-      ["Cholesterol", ingredient.cholesterolMg, "mg"],
-      ["Sodium", ingredient.sodiumMg, "mg"],
-      ["Dietary fiber", ingredient.dietaryFiber, "g"],
-      ["Total sugars", ingredient.totalSugars, "g"],
-      ["Added sugars", ingredient.addedSugars, "g"],
-      ["Vitamin D", ingredient.vitaminDMcg, "mcg"],
-      ["Calcium", ingredient.calciumMg, "mg"],
-      ["Iron", ingredient.ironMg, "mg"],
-      ["Potassium", ingredient.potassiumMg, "mg"],
-    ];
-
-    extraFacts.forEach(([label, value, unit]) => {
-      if (value === null || value === undefined) {
-        return;
-      }
-      entries.push({
-        label,
-        value: `${formatNumber(value)} ${unit}`.trim(),
-      });
-    });
+    entries.push(...buildExtraFactEntries(ingredient));
 
     const summaryContent = document.createElement("span");
     summaryContent.className = "details-summary-row";
@@ -1260,17 +1589,17 @@ const renderIngredients = () => {
     summaryToggle.className = "details-summary-toggle";
     summaryToggle.setAttribute("aria-hidden", "true");
     summaryToggle.textContent = "▼";
-    const summaryText = document.createElement("span");
-    summaryText.className = "meta details-summary-text";
-    summaryText.textContent = "Full label details";
-    summaryContent.append(summaryToggle, summaryText);
+    const summaryLabel = document.createElement("span");
+    summaryLabel.className = "meta details-summary-text";
+    summaryLabel.textContent = "Full label details";
+    summaryContent.append(summaryToggle, summaryLabel);
 
     const details = buildDetails("Full label details", entries, {
       summaryContent,
       summaryClass: "details-summary",
     });
 
-    const menu = createCardMenu([
+    const menuItems = [
       {
         label: "Edit",
         onClick: async () => {
@@ -1290,19 +1619,45 @@ const renderIngredients = () => {
         },
       },
       {
+        label: "Archive ingredient",
+        onClick: async () => {
+          const confirmed = await confirmDialog({
+            title: "Archive ingredient",
+            message: `Archive ${ingredient.name}? Recipes and logs will keep the ingredient details.`,
+            confirmText: "Archive",
+            confirmTone: "primary",
+          });
+          if (!confirmed) {
+            return;
+          }
+          try {
+            setStatus(elements.ingredientStatus, "Archiving...");
+            await api(`/api/ingredients/${ingredient.id}`, { method: "DELETE" });
+            await refreshData();
+            setStatus(elements.ingredientStatus, "Ingredient archived.");
+          } catch (error) {
+            setStatus(elements.ingredientStatus, error.message, "error");
+          }
+        },
+      },
+      {
         label: "Delete ingredient",
         tone: "danger",
         onClick: async () => {
           const confirmed = await confirmDialog({
             title: "Delete ingredient",
-            message: `Delete ${ingredient.name}? Recipes and logs will keep the ingredient details.`,
+            message: `Delete ${ingredient.name}? This removes related log history and recipe items.`,
+            confirmText: "Delete",
+            confirmTone: "danger",
           });
           if (!confirmed) {
             return;
           }
           try {
             setStatus(elements.ingredientStatus, "Deleting...");
-            await api(`/api/ingredients/${ingredient.id}`, { method: "DELETE" });
+            await api(`/api/ingredients/${ingredient.id}?mode=hard`, {
+              method: "DELETE",
+            });
             await refreshData();
             setStatus(elements.ingredientStatus, "Ingredient deleted.");
           } catch (error) {
@@ -1310,14 +1665,14 @@ const renderIngredients = () => {
           }
         },
       },
-    ]);
+    ];
 
-    card.classList.add("has-menu");
-
-    card.append(title, summary, barcode, menu);
-    if (details) {
-      card.appendChild(details);
-    }
+    const card = buildListCard({
+      title: ingredient.name,
+      metaLines: [summaryText, barcodeText],
+      menuItems,
+      details,
+    });
     elements.ingredientList.appendChild(card);
   });
 };
@@ -1344,21 +1699,11 @@ const renderFoods = () => {
   }
 
   items.forEach((food) => {
-    const card = document.createElement("div");
-    card.className = "list-card";
-
-    const title = document.createElement("h4");
-    title.textContent = food.name;
-
-    const summary = document.createElement("div");
-    summary.className = "meta";
-    summary.textContent = `${formatNumber(food.calories)} cal, ${formatNumber(
-      food.protein
-    )}p, ${formatNumber(food.carbs)}c, ${formatNumber(food.fat)}f per ${food.unit}`;
-
-    const barcode = document.createElement("div");
-    barcode.className = "meta";
-    barcode.textContent = food.barcode ? `Barcode: ${food.barcode}` : "Barcode: none";
+    const summaryLine = buildPrimarySummaryText(food);
+    const summaryText = summaryLine
+      ? `${summaryLine} per ${food.unit}`
+      : `Per ${food.unit}`;
+    const barcodeText = food.barcode ? `Barcode: ${food.barcode}` : "Barcode: none";
 
     const entries = [];
     if (food.servingSize) {
@@ -1392,29 +1737,7 @@ const renderFoods = () => {
       });
     }
 
-    const extraFacts = [
-      ["Saturated fat", food.saturatedFat, "g"],
-      ["Trans fat", food.transFat, "g"],
-      ["Cholesterol", food.cholesterolMg, "mg"],
-      ["Sodium", food.sodiumMg, "mg"],
-      ["Dietary fiber", food.dietaryFiber, "g"],
-      ["Total sugars", food.totalSugars, "g"],
-      ["Added sugars", food.addedSugars, "g"],
-      ["Vitamin D", food.vitaminDMcg, "mcg"],
-      ["Calcium", food.calciumMg, "mg"],
-      ["Iron", food.ironMg, "mg"],
-      ["Potassium", food.potassiumMg, "mg"],
-    ];
-
-    extraFacts.forEach(([label, value, unit]) => {
-      if (value === null || value === undefined) {
-        return;
-      }
-      entries.push({
-        label,
-        value: `${formatNumber(value)} ${unit}`.trim(),
-      });
-    });
+    entries.push(...buildExtraFactEntries(food));
 
     const summaryContent = document.createElement("span");
     summaryContent.className = "details-summary-row";
@@ -1422,17 +1745,17 @@ const renderFoods = () => {
     summaryToggle.className = "details-summary-toggle";
     summaryToggle.setAttribute("aria-hidden", "true");
     summaryToggle.textContent = "▼";
-    const summaryText = document.createElement("span");
-    summaryText.className = "meta details-summary-text";
-    summaryText.textContent = "Full label details";
-    summaryContent.append(summaryToggle, summaryText);
+    const summaryLabel = document.createElement("span");
+    summaryLabel.className = "meta details-summary-text";
+    summaryLabel.textContent = "Full label details";
+    summaryContent.append(summaryToggle, summaryLabel);
 
     const details = buildDetails("Full label details", entries, {
       summaryContent,
       summaryClass: "details-summary",
     });
 
-    const menu = createCardMenu([
+    const menuItems = [
       {
         label: "Edit",
         onClick: async () => {
@@ -1452,19 +1775,43 @@ const renderFoods = () => {
         },
       },
       {
+        label: "Archive food",
+        onClick: async () => {
+          const confirmed = await confirmDialog({
+            title: "Archive food",
+            message: `Archive ${food.name}? Logs will keep the food details.`,
+            confirmText: "Archive",
+            confirmTone: "primary",
+          });
+          if (!confirmed) {
+            return;
+          }
+          try {
+            setStatus(elements.foodStatus, "Archiving...");
+            await api(`/api/foods/${food.id}`, { method: "DELETE" });
+            await refreshData();
+            setStatus(elements.foodStatus, "Food archived.");
+          } catch (error) {
+            setStatus(elements.foodStatus, error.message, "error");
+          }
+        },
+      },
+      {
         label: "Delete food",
         tone: "danger",
         onClick: async () => {
           const confirmed = await confirmDialog({
             title: "Delete food",
-            message: `Delete ${food.name}? Logs will keep the food details.`,
+            message: `Delete ${food.name}? This removes related log history and recipe items.`,
+            confirmText: "Delete",
+            confirmTone: "danger",
           });
           if (!confirmed) {
             return;
           }
           try {
             setStatus(elements.foodStatus, "Deleting...");
-            await api(`/api/foods/${food.id}`, { method: "DELETE" });
+            await api(`/api/foods/${food.id}?mode=hard`, { method: "DELETE" });
             await refreshData();
             setStatus(elements.foodStatus, "Food deleted.");
           } catch (error) {
@@ -1472,43 +1819,34 @@ const renderFoods = () => {
           }
         },
       },
-    ]);
+    ];
 
-    card.classList.add("has-menu");
-
-    card.append(title, summary, barcode, menu);
-    if (details) {
-      card.appendChild(details);
-    }
+    const card = buildListCard({
+      title: food.name,
+      metaLines: [summaryText, barcodeText],
+      menuItems,
+      details,
+    });
     elements.foodList.appendChild(card);
   });
 };
 
-const buildLibraryPayload = (item) => ({
-  name: item?.name ?? "",
-  barcode: item?.barcode ?? "",
-  calories: item?.calories ?? 0,
-  protein: item?.protein ?? 0,
-  carbs: item?.carbs ?? 0,
-  fat: item?.fat ?? 0,
-  unit: item?.unit ?? "",
-  servingSize: item?.servingSize ?? "",
-  servingsPerContainer: item?.servingsPerContainer ?? "",
-  saturatedFat: item?.saturatedFat ?? "",
-  transFat: item?.transFat ?? "",
-  cholesterolMg: item?.cholesterolMg ?? "",
-  sodiumMg: item?.sodiumMg ?? "",
-  dietaryFiber: item?.dietaryFiber ?? "",
-  totalSugars: item?.totalSugars ?? "",
-  addedSugars: item?.addedSugars ?? "",
-  vitaminDMcg: item?.vitaminDMcg ?? "",
-  calciumMg: item?.calciumMg ?? "",
-  ironMg: item?.ironMg ?? "",
-  potassiumMg: item?.potassiumMg ?? "",
-  ingredientsList: item?.ingredientsList ?? "",
-  vitamins: item?.vitamins ?? "",
-  allergens: item?.allergens ?? "",
-});
+const buildLibraryPayload = (item) => {
+  const payload = {
+    name: item?.name ?? "",
+    barcode: item?.barcode ?? "",
+    unit: item?.unit ?? "",
+    servingSize: item?.servingSize ?? "",
+    servingsPerContainer: item?.servingsPerContainer ?? "",
+    ingredientsList: item?.ingredientsList ?? "",
+    vitamins: item?.vitamins ?? "",
+    allergens: item?.allergens ?? "",
+  };
+  getTrackedTargetKeys().forEach((key) => {
+    payload[key] = item?.[key] ?? "";
+  });
+  return payload;
+};
 
 const convertIngredientToFood = async (ingredient) => {
   if (!ingredient) {
@@ -1530,6 +1868,7 @@ const convertIngredientToFood = async (ingredient) => {
     title: "Move to food",
     message: `Move ${ingredient.name} to foods? Recipes and logs will keep the ingredient details.`,
     confirmText: "Move",
+    confirmTone: "primary",
     cancelText: "Cancel",
   });
   if (!confirmed) {
@@ -1570,6 +1909,7 @@ const convertFoodToIngredient = async (food) => {
     title: "Move to ingredient",
     message: `Move ${food.name} to ingredients? Logs will keep the food details.`,
     confirmText: "Move",
+    confirmTone: "primary",
     cancelText: "Cancel",
   });
   if (!confirmed) {
@@ -1590,217 +1930,97 @@ const convertFoodToIngredient = async (food) => {
   }
 };
 
-const updateRecipeOverview = () => {
-  if (!elements.recipeCalories || !elements.recipeItems) {
+const setRecipePanelMode = (mode) => {
+  if (!elements.recipeList || !elements.recipeIngredientList) {
     return;
   }
-
-  const totals = { calories: 0, protein: 0, carbs: 0, fat: 0 };
-  const customTotals = {};
-  CUSTOM_TARGET_OPTIONS.forEach((option) => {
-    customTotals[option.key] = 0;
-  });
-  const targets = state.targets || {};
-  const rows = Array.from(
-    elements.recipeItems.querySelectorAll(".recipe-item-row")
-  );
-
-  rows.forEach((row) => {
-    const select = row.querySelector("select");
-    const inputs = row.querySelectorAll("input");
-    const quantityInput = inputs[0];
-    const unitInput = inputs[1];
-    const ingredientId = Number(select?.value);
-    const ingredient = state.ingredients.find((item) => item.id === ingredientId);
-    if (!ingredient) {
-      return;
-    }
-    const quantity = Math.max(parseNumeric(quantityInput?.value, 1), 0);
-    const unit = String(unitInput?.value || ingredient.unit || "").trim();
-    const normalized = normalizeIngredientQuantity(ingredient, quantity, unit);
-    if (normalized.error) {
-      return;
-    }
-    totals.calories += parseNumeric(ingredient.calories, 0) * normalized.quantity;
-    totals.protein += parseNumeric(ingredient.protein, 0) * normalized.quantity;
-    totals.carbs += parseNumeric(ingredient.carbs, 0) * normalized.quantity;
-    totals.fat += parseNumeric(ingredient.fat, 0) * normalized.quantity;
-    CUSTOM_TARGET_OPTIONS.forEach((option) => {
-      customTotals[option.key] +=
-        parseNumeric(ingredient[option.key], 0) * normalized.quantity;
-    });
-  });
-
-  elements.recipeCalories.textContent = formatNumber(totals.calories, 0);
-  if (elements.recipeProtein) {
-    elements.recipeProtein.textContent = `${formatNumber(totals.protein)}g`;
-  }
-  if (elements.recipeCarbs) {
-    elements.recipeCarbs.textContent = `${formatNumber(totals.carbs)}g`;
-  }
-  if (elements.recipeFat) {
-    elements.recipeFat.textContent = `${formatNumber(totals.fat)}g`;
-  }
-
-  setProgressBar(
-    elements.recipeCaloriesProgress,
-    totals.calories,
-    targets.calories
-  );
-  setProgressBar(elements.recipeProteinProgress, totals.protein, targets.protein);
-  setProgressBar(elements.recipeCarbsProgress, totals.carbs, targets.carbs);
-  setProgressBar(elements.recipeFatProgress, totals.fat, targets.fat);
-
-  if (elements.recipeCaloriesMeta && elements.recipeForm) {
-    const servingsInput = elements.recipeForm.querySelector("[name='servings']");
-    const servingsRaw = parseNumeric(servingsInput?.value, 1);
-    const servings = Math.max(1, Math.round(servingsRaw));
-    const servingsLabel =
-      servings === 1 ? "Total recipe" : `${servings} servings`;
-    const caloriesTarget = formatTarget(
-      targets.calories,
-      " cal",
-      Boolean(targets.caloriesAllowOver)
+  const nextMode = mode === "ingredients" ? "ingredients" : "recipes";
+  recipePanelMode = nextMode;
+  if (elements.recipePanelRecipes) {
+    elements.recipePanelRecipes.classList.toggle(
+      "is-active",
+      nextMode === "recipes"
     );
-    elements.recipeCaloriesMeta.textContent = caloriesTarget
-      ? `Target: ${caloriesTarget} · ${servingsLabel}`
-      : servingsLabel;
   }
-
-  if (elements.recipeProteinMeta) {
-    const proteinTarget = formatTarget(
-      targets.protein,
-      "g",
-      Boolean(targets.proteinAllowOver)
+  if (elements.recipePanelIngredients) {
+    elements.recipePanelIngredients.classList.toggle(
+      "is-active",
+      nextMode === "ingredients"
     );
-    elements.recipeProteinMeta.textContent = proteinTarget
-      ? `Target: ${proteinTarget}`
-      : "Target not set";
   }
-  if (elements.recipeCarbsMeta) {
-    const carbsTarget = formatTarget(
-      targets.carbs,
-      "g",
-      Boolean(targets.carbsAllowOver)
-    );
-    elements.recipeCarbsMeta.textContent = carbsTarget
-      ? `Target: ${carbsTarget}`
-      : "Target not set";
+  if (elements.recipeListPanel) {
+    elements.recipeListPanel.hidden = nextMode !== "recipes";
   }
-  if (elements.recipeFatMeta) {
-    const fatTarget = formatTarget(
-      targets.fat,
-      "g",
-      Boolean(targets.fatAllowOver)
-    );
-    elements.recipeFatMeta.textContent = fatTarget
-      ? `Target: ${fatTarget}`
-      : "Target not set";
+  if (elements.recipeIngredientsPanel) {
+    elements.recipeIngredientsPanel.hidden = nextMode !== "ingredients";
   }
-
-  renderRecipeCustomTargets(customTotals);
 };
 
-const renderRecipeCustomTargets = (totals) => {
-  if (!elements.recipeCustomTargetsList || !elements.recipeCustomTargetsEmpty) {
-    return;
-  }
-  const targets = (state.customTargets || []).filter(
-    (target) => !isCoreTargetKey(target.key)
-  );
-  elements.recipeCustomTargetsList.innerHTML = "";
-  if (!targets.length) {
-    elements.recipeCustomTargetsEmpty.hidden = false;
-    return;
-  }
-  elements.recipeCustomTargetsEmpty.hidden = true;
+const getRecipeRows = () =>
+  Array.from(elements.recipeItems?.querySelectorAll(".recipe-item-row") || []);
 
-  targets.forEach((target) => {
-    const current = parseNumeric(totals?.[target.key], 0);
-    const targetValue = parseNumeric(target.target, 0);
-    const unit = target.unit || getCustomTargetOption(target.key)?.unit || "";
-    const percent =
-      targetValue > 0 ? Math.min(100, (current / targetValue) * 100) : 0;
-
-    const item = document.createElement("div");
-    item.className = "macro-item custom-target-item";
-    if (!target.allowOver && targetValue > 0 && current > targetValue) {
-      item.classList.add("is-over");
-    }
-
-    const label = document.createElement("span");
-    label.className = "macro-label";
-    label.textContent = target.label;
-
-    const value = document.createElement("h3");
-    value.textContent = `${formatNumber(current)}${unit}`;
-
-    const progress = document.createElement("div");
-    progress.className = "progress small";
-    const bar = document.createElement("div");
-    bar.className = "progress-bar";
-    bar.style.width = `${percent}%`;
-    progress.appendChild(bar);
-
-    const meta = document.createElement("span");
-    meta.className = "meta";
-    const suffix = target.allowOver ? "+" : "";
-    meta.textContent = `Target: ${formatNumber(targetValue)}${unit}${suffix}`;
-
-    item.append(label, value, progress, meta);
-    elements.recipeCustomTargetsList.appendChild(item);
-  });
-};
-
-const renderRecipeItems = () => {
+const ensureRecipeItemsPlaceholder = () => {
   if (!elements.recipeItems) {
     return;
   }
-  elements.recipeItems.innerHTML = "";
-  if (!state.ingredients.length) {
+  const existing = elements.recipeItems.querySelector(".recipe-items-empty");
+  const hasRows = Boolean(elements.recipeItems.querySelector(".recipe-item-row"));
+  if (hasRows) {
+    if (existing) {
+      existing.remove();
+    }
+    return;
+  }
+  if (!existing) {
     const empty = document.createElement("p");
-    empty.className = "meta";
-    empty.textContent = "Add ingredients before building recipes.";
+    empty.className = "meta recipe-items-empty";
+    empty.textContent = "Use the ingredient list to add items.";
     elements.recipeItems.appendChild(empty);
-    updateRecipeOverview();
-    return;
   }
-  addRecipeRow();
-  updateRecipeOverview();
 };
 
-const addRecipeRow = () => {
+const clearRecipeItemsPlaceholder = () => {
   if (!elements.recipeItems) {
     return;
   }
+  const existing = elements.recipeItems.querySelector(".recipe-items-empty");
+  if (existing) {
+    existing.remove();
+  }
+};
+
+const addRecipeRow = (ingredient, options = {}) => {
+  if (!elements.recipeItems || !ingredient) {
+    return;
+  }
+  clearRecipeItemsPlaceholder();
   const row = document.createElement("div");
   row.className = "recipe-item-row";
+  row.dataset.ingredientId = String(ingredient.id);
+  row._ingredient = ingredient;
 
-  const select = document.createElement("select");
-  state.ingredients.forEach((ingredient) => {
-    const option = document.createElement("option");
-    option.value = ingredient.id;
-    option.textContent = ingredient.name;
-    option.dataset.unit = ingredient.unit;
-    select.appendChild(option);
-  });
+  const name = document.createElement("div");
+  name.className = "recipe-item-name";
+  const title = document.createElement("span");
+  title.textContent = ingredient.name;
+  name.appendChild(title);
+  if (ingredient.barcode) {
+    const barcode = document.createElement("span");
+    barcode.className = "meta";
+    barcode.textContent = `Barcode: ${ingredient.barcode}`;
+    name.appendChild(barcode);
+  }
 
   const quantity = document.createElement("input");
   quantity.type = "number";
-  quantity.step = "0.01";
-  quantity.value = "1";
+  quantity.step = "1";
+  quantity.value = options.quantity ?? "1";
+  quantity.className = "recipe-quantity";
 
   const unit = document.createElement("input");
   unit.type = "text";
-  unit.value = state.ingredients[0]?.unit || "";
-
-  select.addEventListener("change", () => {
-    const selected = select.options[select.selectedIndex];
-    if (selected?.dataset.unit) {
-      unit.value = selected.dataset.unit;
-    }
-    updateRecipeOverview();
-  });
+  unit.value = options.unit ?? ingredient.unit ?? "";
+  unit.className = "recipe-unit";
 
   const remove = document.createElement("button");
   remove.type = "button";
@@ -1808,14 +2028,211 @@ const addRecipeRow = () => {
   remove.textContent = "Remove";
   remove.addEventListener("click", () => {
     row.remove();
+    ensureRecipeItemsPlaceholder();
     updateRecipeOverview();
   });
 
-  row.append(select, quantity, unit, remove);
+  row.append(name, quantity, unit, remove);
   elements.recipeItems.appendChild(row);
   quantity.addEventListener("input", updateRecipeOverview);
   unit.addEventListener("input", updateRecipeOverview);
+  if (!options.skipUpdate) {
+    updateRecipeOverview();
+  }
+};
+
+const renderRecipeItems = (items = []) => {
+  if (!elements.recipeItems) {
+    return;
+  }
+  elements.recipeItems.innerHTML = "";
+  if (!items.length) {
+    ensureRecipeItemsPlaceholder();
+    updateRecipeOverview();
+    return;
+  }
+  items.forEach((item) => {
+    const ingredient =
+      item?.ingredient ||
+      state.ingredients.find((entry) => entry.id === item?.ingredientId);
+    if (!ingredient) {
+      return;
+    }
+    addRecipeRow(ingredient, {
+      quantity: item.quantity,
+      unit: item.unit,
+      skipUpdate: true,
+    });
+  });
+  ensureRecipeItemsPlaceholder();
   updateRecipeOverview();
+};
+
+const updateRecipeImpact = (impactTotals, hasItems) => {
+  if (!elements.recipeForm) {
+    return;
+  }
+  const baseTotals = getSelectedDayTotals();
+  const primaryKeys = getPrimaryTargetKeys();
+  if (!hasItems) {
+    state.logImpact = null;
+    renderTodayTotals(baseTotals, null);
+    updateProgressBars(baseTotals);
+    setImpactBars(createTotals(primaryKeys));
+    renderCustomTargetsPanel();
+    return;
+  }
+
+  state.logImpact = impactTotals;
+  renderTodayTotals(baseTotals, impactTotals);
+  updateProgressBars(baseTotals);
+  const projected = createTotals(primaryKeys);
+  primaryKeys.forEach((key) => {
+    projected[key] =
+      parseNumeric(baseTotals?.[key], 0) + parseNumeric(impactTotals?.[key], 0);
+  });
+  setImpactBars(projected);
+  renderCustomTargetsPanel();
+};
+
+const updateRecipeOverview = () => {
+  if (!elements.recipeItems) {
+    return;
+  }
+
+  const trackedKeys = getTrackedTargetKeys();
+  const totals = createTotals(trackedKeys);
+  const rows = getRecipeRows();
+
+  rows.forEach((row) => {
+    const ingredientId = Number(row.dataset.ingredientId);
+    const ingredient =
+      row._ingredient ||
+      state.ingredients.find((item) => item.id === ingredientId);
+    if (!ingredient) {
+      return;
+    }
+    const quantityInput = row.querySelector(".recipe-quantity");
+    const unitInput = row.querySelector(".recipe-unit");
+    const quantity = Math.max(parseNumeric(quantityInput?.value, 1), 0);
+    const unit = String(unitInput?.value || ingredient.unit || "").trim();
+    const normalized = normalizeIngredientQuantity(ingredient, quantity, unit);
+    if (normalized.error) {
+      return;
+    }
+    addTotals(totals, ingredient, normalized.quantity, trackedKeys);
+  });
+
+  const servingsInput = elements.recipeForm?.querySelector("[name='servings']");
+  const servingsRaw = parseNumeric(servingsInput?.value, 1);
+  const servings = Math.max(1, Math.round(servingsRaw));
+  const perServing = createTotals(trackedKeys);
+  trackedKeys.forEach((key) => {
+    perServing[key] = parseNumeric(totals?.[key], 0) / servings;
+  });
+  updateRecipeImpact(perServing, rows.length > 0);
+};
+
+const renderRecipeIngredientList = () => {
+  if (!elements.recipeIngredientList) {
+    return;
+  }
+  const query = elements.recipeIngredientSearch
+    ? elements.recipeIngredientSearch.value.trim().toLowerCase()
+    : "";
+  const items = query
+    ? state.ingredients.filter((ingredient) => {
+        const nameMatch = ingredient.name.toLowerCase().includes(query);
+        const barcode = String(ingredient.barcode || "").toLowerCase();
+        const barcodeMatch = barcode.includes(query);
+        return nameMatch || barcodeMatch;
+      })
+    : state.ingredients;
+
+  elements.recipeIngredientList.innerHTML = "";
+  if (!state.ingredients.length) {
+    const empty = document.createElement("div");
+    empty.className = "list-card";
+    empty.textContent = "Add ingredients to your library first.";
+    elements.recipeIngredientList.appendChild(empty);
+    return;
+  }
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "list-card";
+    empty.textContent = "No ingredients match that search.";
+    elements.recipeIngredientList.appendChild(empty);
+    return;
+  }
+
+  items.forEach((ingredient) => {
+    const summaryText = ingredient.barcode
+      ? `Barcode: ${ingredient.barcode}`
+      : "Barcode: none";
+    const actions = [
+      {
+        label: "Add",
+        onClick: () => {
+          addRecipeRow(ingredient);
+        },
+      },
+    ];
+
+    const card = buildListCard({
+      title: ingredient.name,
+      metaLines: [summaryText],
+      actions,
+    });
+    elements.recipeIngredientList.appendChild(card);
+  });
+};
+
+const setRecipeFormMode = (recipe) => {
+  if (!elements.recipeForm) {
+    return;
+  }
+  if (!recipe) {
+    editingRecipeId = null;
+    if (elements.recipeFormTitle) {
+      elements.recipeFormTitle.textContent = "Create recipe";
+    }
+    if (elements.recipeSubmit) {
+      elements.recipeSubmit.textContent = "Create recipe";
+    }
+    if (elements.recipeCancel) {
+      elements.recipeCancel.hidden = true;
+    }
+    elements.recipeForm.reset();
+    renderRecipeItems([]);
+    setRecipePanelMode("recipes");
+    return;
+  }
+
+  editingRecipeId = recipe.id;
+  if (elements.recipeFormTitle) {
+    elements.recipeFormTitle.textContent = "Edit recipe";
+  }
+  if (elements.recipeSubmit) {
+    elements.recipeSubmit.textContent = "Save recipe";
+  }
+  if (elements.recipeCancel) {
+    elements.recipeCancel.hidden = false;
+  }
+
+  const nameInput = elements.recipeForm.querySelector("[name='name']");
+  const servingsInput = elements.recipeForm.querySelector("[name='servings']");
+  const notesInput = elements.recipeForm.querySelector("[name='notes']");
+  if (nameInput) {
+    nameInput.value = recipe.name || "";
+  }
+  if (servingsInput) {
+    servingsInput.value = recipe.servings || 1;
+  }
+  if (notesInput) {
+    notesInput.value = recipe.notes || "";
+  }
+  renderRecipeItems(recipe.items || []);
+  setRecipePanelMode("ingredients");
 };
 
 const renderRecipes = () => {
@@ -1832,27 +2249,17 @@ const renderRecipes = () => {
   }
 
   state.recipes.forEach((recipe) => {
-    const card = document.createElement("div");
-    card.className = "list-card";
+    const summaryText = `${recipe.servings} servings`;
 
-    const title = document.createElement("h4");
-    title.textContent = recipe.name;
+    const perServingSummary = buildPrimarySummaryText(
+      recipe.nutrition.perServing
+    );
+    const perServingText = perServingSummary
+      ? `Per serving: ${perServingSummary}`
+      : "Per serving";
 
-    const summary = document.createElement("div");
-    summary.className = "meta";
-    summary.textContent = `${recipe.servings} servings`;
-
-    const perServingText = `Per serving: ${formatNumber(
-      recipe.nutrition.perServing.calories
-    )} cal, ${formatNumber(recipe.nutrition.perServing.protein)}p, ${formatNumber(
-      recipe.nutrition.perServing.carbs
-    )}c, ${formatNumber(recipe.nutrition.perServing.fat)}f`;
-
-    const totalLine = `Total: ${formatNumber(
-      recipe.nutrition.totals.calories
-    )} cal, ${formatNumber(recipe.nutrition.totals.protein)}p, ${formatNumber(
-      recipe.nutrition.totals.carbs
-    )}c, ${formatNumber(recipe.nutrition.totals.fat)}f`;
+    const totalSummary = buildPrimarySummaryText(recipe.nutrition.totals);
+    const totalLine = totalSummary ? `Total: ${totalSummary}` : "Total";
 
     const ingredientsLine = recipe.items
       .map(
@@ -1878,44 +2285,80 @@ const renderRecipes = () => {
     summaryToggle.className = "details-summary-toggle";
     summaryToggle.setAttribute("aria-hidden", "true");
     summaryToggle.textContent = "▼";
-    const summaryText = document.createElement("span");
-    summaryText.className = "meta details-summary-text";
-    summaryText.textContent = perServingText;
-    summaryContent.append(summaryToggle, summaryText);
+    const summaryLabel = document.createElement("span");
+    summaryLabel.className = "meta details-summary-text";
+    summaryLabel.textContent = perServingText;
+    summaryContent.append(summaryToggle, summaryLabel);
 
     const details = buildDetails("Full recipe details", entries, {
       summaryContent,
       summaryClass: "details-summary",
     });
 
-    card.classList.add("has-delete");
+    const menuItems = [
+      {
+        label: "Edit",
+        onClick: async () => {
+          setRecipeFormMode(recipe);
+          elements.recipeForm?.scrollIntoView({
+            behavior: "smooth",
+            block: "start",
+          });
+        },
+      },
+      {
+        label: "Archive recipe",
+        onClick: async () => {
+          const confirmed = await confirmDialog({
+            title: "Archive recipe",
+            message: `Archive ${recipe.name}? Logged intakes will keep the recipe details.`,
+            confirmText: "Archive",
+            confirmTone: "primary",
+          });
+          if (!confirmed) {
+            return;
+          }
+          try {
+            setStatus(elements.recipeStatus, "Archiving...");
+            await api(`/api/recipes/${recipe.id}`, { method: "DELETE" });
+            await refreshData();
+            setStatus(elements.recipeStatus, "Recipe archived.");
+          } catch (error) {
+            setStatus(elements.recipeStatus, error.message, "error");
+          }
+        },
+      },
+      {
+        label: "Delete recipe",
+        tone: "danger",
+        onClick: async () => {
+          const confirmed = await confirmDialog({
+            title: "Delete recipe",
+            message: `Delete ${recipe.name}? This removes related log history.`,
+            confirmText: "Delete",
+            confirmTone: "danger",
+          });
+          if (!confirmed) {
+            return;
+          }
+          try {
+            setStatus(elements.recipeStatus, "Deleting...");
+            await api(`/api/recipes/${recipe.id}?mode=hard`, { method: "DELETE" });
+            await refreshData();
+            setStatus(elements.recipeStatus, "Recipe deleted.");
+          } catch (error) {
+            setStatus(elements.recipeStatus, error.message, "error");
+          }
+        },
+      },
+    ];
 
-    const deleteButton = document.createElement("button");
-    deleteButton.type = "button";
-    setupDeleteButton(deleteButton, { label: "Delete recipe", card: true });
-    deleteButton.addEventListener("click", async () => {
-      const confirmed = await confirmDialog({
-        title: "Delete recipe",
-        message: `Delete ${recipe.name}? Logged intakes will keep the recipe details.`,
-      });
-      if (!confirmed) {
-        return;
-      }
-      try {
-        setStatus(elements.recipeStatus, "Deleting...");
-        await api(`/api/recipes/${recipe.id}`, { method: "DELETE" });
-        await refreshData();
-        setStatus(elements.recipeStatus, "Recipe deleted.");
-      } catch (error) {
-        setStatus(elements.recipeStatus, error.message, "error");
-      }
+    const card = buildListCard({
+      title: recipe.name,
+      metaLines: [summaryText],
+      menuItems,
+      details,
     });
-
-    card.append(title, summary);
-    if (details) {
-      card.appendChild(details);
-    }
-    card.appendChild(deleteButton);
 
     elements.recipeList.appendChild(card);
   });
@@ -1950,65 +2393,31 @@ const renderLogList = () => {
   const entries = limit ? sortedLogs.slice(0, limit) : sortedLogs;
 
   entries.forEach((entry) => {
-    const card = document.createElement("div");
-    card.className = "list-card";
-
-    const title = document.createElement("h4");
-    title.textContent = entry.label || "Entry";
-
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.textContent = `${formatNumber(entry.quantity)} ${entry.unit} · ${formatEntryTimestamp(
+    const titleText = entry.label || "Entry";
+    const metaText = `${formatNumber(entry.quantity)} ${entry.unit} · ${formatEntryTimestamp(
       entry
     )}`;
 
     const macrosSummary = document.createElement("span");
     macrosSummary.className = "meta details-summary-text";
-    const baseSummary = `${formatNumber(
-      entry.nutrition.calories
-    )} cal, ${formatNumber(entry.nutrition.protein)}p, ${formatNumber(
-      entry.nutrition.carbs
-    )}c, ${formatNumber(entry.nutrition.fat)}f`;
-    const customSummary = (state.customTargets || [])
-      .filter((target) => !isCoreTargetKey(target.key))
-      .map((target) => {
-        const unit = getCustomTargetUnit(target.key);
-        const value = parseNumeric(entry?.nutrition?.[target.key], 0);
-        return `${target.label}: ${formatNumber(value)}${unit}`.trim();
-      });
-    macrosSummary.textContent = customSummary.length
-      ? `${baseSummary} · ${customSummary.join(" · ")}`
-      : baseSummary;
+    const baseSummary = buildPrimarySummaryText(entry.nutrition);
+    const customSummary = getSecondaryTargets().map((target) => {
+      const unit = getTargetUnit(target.key);
+      const label = getTargetLabel(target.key);
+      const value = parseNumeric(entry?.nutrition?.[target.key], 0);
+      return `${label}: ${formatNutrientDisplay(value, unit)}`.trim();
+    });
+    if (baseSummary && customSummary.length) {
+      macrosSummary.textContent = `${baseSummary} · ${customSummary.join(" · ")}`;
+    } else {
+      macrosSummary.textContent = baseSummary || customSummary.join(" · ");
+    }
 
     const detailEntries = [];
     if (entry.notes) {
       detailEntries.push({ label: "Notes", value: entry.notes, wide: true });
     }
-    detailEntries.push({
-      label: "Calories",
-      value: `${formatNumber(entry.nutrition.calories)} cal`,
-    });
-    detailEntries.push({
-      label: "Protein",
-      value: `${formatNumber(entry.nutrition.protein)} g`,
-    });
-    detailEntries.push({
-      label: "Carbs",
-      value: `${formatNumber(entry.nutrition.carbs)} g`,
-    });
-    detailEntries.push({
-      label: "Fat",
-      value: `${formatNumber(entry.nutrition.fat)} g`,
-    });
-    CUSTOM_TARGET_OPTIONS.forEach((target) => {
-      const unit = getCustomTargetUnit(target.key);
-      const label = getCustomTargetLabel(target.key);
-      const value = parseNumeric(entry?.nutrition?.[target.key], 0);
-      detailEntries.push({
-        label,
-        value: `${formatNumber(value)} ${unit}`.trim(),
-      });
-    });
+    detailEntries.push(...buildNutritionDetailEntries(entry.nutrition));
 
     const summaryContent = document.createElement("span");
     summaryContent.className = "details-summary-row";
@@ -2029,6 +2438,8 @@ const renderLogList = () => {
       const confirmed = await confirmDialog({
         title: "Delete log entry",
         message: "Delete this log entry?",
+        confirmText: "Delete",
+        confirmTone: "danger",
       });
       if (!confirmed) {
         return;
@@ -2043,49 +2454,64 @@ const renderLogList = () => {
       }
     });
 
-    card.classList.add("has-delete");
-    card.append(title, meta);
-    if (details) {
-      card.appendChild(details);
-    }
+    const card = buildListCard({
+      title: titleText,
+      metaLines: [metaText],
+      details,
+      className: "has-delete",
+    });
     card.appendChild(deleteButton);
 
     elements.logList.appendChild(card);
   });
 };
 
-const getSelectedDayTotals = () => {
-  const targetValue = getSelectedDayValue() || toDateInputValue(new Date());
-  return state.logs.reduce(
-    (acc, entry) => {
-      if (getEntryDayValue(entry) !== targetValue) {
-        return acc;
+const getSelectedDayTotals = () =>
+  getSelectedDayNutrientTotals(getTrackedTargetKeys());
+
+const shouldShowImpactValues = (impact) => {
+  if (elements.logForm) {
+    return Boolean(impact && !elements.logItem?.disabled);
+  }
+  if (elements.recipeForm) {
+    return Boolean(impact);
+  }
+  return false;
+};
+
+const renderTodayTotals = (totals, impact) => {
+  const statElements = getTargetElementMap("[id^='today-']", "today-");
+  const shouldShowImpact = shouldShowImpactValues(impact);
+  statElements.forEach((element, key) => {
+    const unit = getTargetUnit(key);
+    const suffix = getElementUnitSuffix(element, unit);
+    const value = parseNumeric(totals?.[key], 0);
+    const baseText = `${formatNutrientValue(value, unit)}${suffix}`;
+    const impactValue = parseNumeric(impact?.[key], 0);
+    const showImpact =
+      shouldShowImpact && Number.isFinite(impactValue) && impactValue !== 0;
+    if (showImpact) {
+      const impactSpan = document.createElement("span");
+      impactSpan.className = "impact-inline";
+      const targetValue = parseNumeric(getTargetValue(key), 0);
+      const projected = value + impactValue;
+      const willOver =
+        targetValue > 0 && projected > targetValue && !getTargetAllowOver(key);
+      if (willOver) {
+        impactSpan.classList.add("is-over");
       }
-      acc.calories += entry.nutrition.calories;
-      acc.protein += entry.nutrition.protein;
-      acc.carbs += entry.nutrition.carbs;
-      acc.fat += entry.nutrition.fat;
-      return acc;
-    },
-    { calories: 0, protein: 0, carbs: 0, fat: 0 }
-  );
+      impactSpan.textContent = formatImpactValue(impactValue, suffix);
+      element.replaceChildren(baseText, " ", impactSpan);
+    } else {
+      element.textContent = baseText;
+    }
+  });
 };
 
 const updateTodayStats = () => {
   const totals = getSelectedDayTotals();
 
-  if (elements.todayCalories) {
-    elements.todayCalories.textContent = formatNumber(totals.calories, 0);
-  }
-  if (elements.todayProtein) {
-    elements.todayProtein.textContent = `${formatNumber(totals.protein)}g`;
-  }
-  if (elements.todayCarbs) {
-    elements.todayCarbs.textContent = `${formatNumber(totals.carbs)}g`;
-  }
-  if (elements.todayFat) {
-    elements.todayFat.textContent = `${formatNumber(totals.fat)}g`;
-  }
+  renderTodayTotals(totals, null);
 
   updateProgressBars(totals);
   updateLogImpact();
@@ -2124,61 +2550,56 @@ const setImpactBar = (bar, value, target, options = {}) => {
   }
 };
 
+const setImpactBars = (values) => {
+  const impactBars = getTargetElementMap(
+    "[id$='-impact-progress']",
+    "",
+    "-impact-progress"
+  );
+  impactBars.forEach((bar, key) => {
+    setImpactBar(bar, values?.[key], getTargetValue(key), {
+      warnOver: !getTargetAllowOver(key),
+    });
+  });
+};
+
 const formatTarget = (value, unit, allowOver = false) => {
   if (!value || !Number.isFinite(value) || value <= 0) {
     return null;
   }
   const suffix = allowOver ? "+" : "";
-  return `${formatNumber(value)}${unit}${suffix}`;
+  return `${formatNutrientDisplay(value, unit)}${suffix}`;
 };
 
 const updateProgressBars = (totals) => {
-  const targets = state.targets || {};
-  setProgressBar(elements.caloriesProgress, totals.calories, targets.calories);
-  setProgressBar(elements.proteinProgress, totals.protein, targets.protein);
-  setProgressBar(elements.carbsProgress, totals.carbs, targets.carbs);
-  setProgressBar(elements.fatProgress, totals.fat, targets.fat);
+  const progressBars = getTargetElementMap(
+    "[id$='-progress']:not([id^='recipe-'])",
+    "",
+    "-progress"
+  );
+  progressBars.forEach((bar, key) => {
+    setProgressBar(bar, totals?.[key], getTargetValue(key));
+    const macroItem = bar.closest(".macro-item");
+    if (macroItem) {
+      const targetValue = parseNumeric(getTargetValue(key), 0);
+      const current = parseNumeric(totals?.[key], 0);
+      const isOver =
+        targetValue > 0 && current > targetValue && !getTargetAllowOver(key);
+      macroItem.classList.toggle("is-over", isOver);
+    }
+  });
 
-  if (elements.caloriesTarget) {
-    const caloriesTarget = formatTarget(
-      targets.calories,
-      "",
-      Boolean(targets.caloriesAllowOver)
+  const targetLabels = getTargetElementMap("[id$='-target']", "", "-target");
+  targetLabels.forEach((element, key) => {
+    const targetValue = formatTarget(
+      getTargetValue(key),
+      getTargetUnit(key),
+      getTargetAllowOver(key)
     );
-    elements.caloriesTarget.textContent = caloriesTarget
-      ? `Target: ${caloriesTarget}`
-      : "Target not set";
-  }
-  if (elements.proteinTarget) {
-    const proteinTarget = formatTarget(
-      targets.protein,
-      "g",
-      Boolean(targets.proteinAllowOver)
-    );
-    elements.proteinTarget.textContent = proteinTarget
-      ? `Target: ${proteinTarget}`
-      : "Protein";
-  }
-  if (elements.carbsTarget) {
-    const carbsTarget = formatTarget(
-      targets.carbs,
-      "g",
-      Boolean(targets.carbsAllowOver)
-    );
-    elements.carbsTarget.textContent = carbsTarget
-      ? `Target: ${carbsTarget}`
-      : "Carbs";
-  }
-  if (elements.fatTarget) {
-    const fatTarget = formatTarget(
-      targets.fat,
-      "g",
-      Boolean(targets.fatAllowOver)
-    );
-    elements.fatTarget.textContent = fatTarget
-      ? `Target: ${fatTarget}`
-      : "Fat";
-  }
+    element.textContent = targetValue
+      ? `Target: ${targetValue}`
+      : getElementFallbackText(element);
+  });
 };
 
 const getSelectedDayNutrientTotals = (keys) => {
@@ -2205,9 +2626,7 @@ const renderCustomTargetsPanel = () => {
   if (!elements.customTargetsList || !elements.customTargetsEmpty) {
     return;
   }
-  const targets = (state.customTargets || []).filter(
-    (target) => !isCoreTargetKey(target.key)
-  );
+  const targets = getSecondaryTargets();
   elements.customTargetsList.innerHTML = "";
   if (!targets.length) {
     elements.customTargetsEmpty.hidden = false;
@@ -2219,13 +2638,14 @@ const renderCustomTargetsPanel = () => {
     targets.map((target) => target.key)
   );
   const impactTotals = state.logImpact || {};
+  const showImpact = shouldShowImpactValues(state.logImpact);
 
   targets.forEach((target) => {
     const current = parseNumeric(totals[target.key], 0);
     const impactValue = parseNumeric(impactTotals[target.key], 0);
     const projectedValue = current + impactValue;
     const targetValue = parseNumeric(target.target, 0);
-    const unit = target.unit || getCustomTargetOption(target.key)?.unit || "";
+    const unit = getTargetUnit(target.key);
     const percent =
       targetValue > 0 ? Math.min(100, (current / targetValue) * 100) : 0;
     const projectedPercent =
@@ -2233,17 +2653,28 @@ const renderCustomTargetsPanel = () => {
         ? Math.min(100, (projectedValue / targetValue) * 100)
         : 0;
     const item = document.createElement("div");
-    item.className = "macro-item custom-target-item";
+    item.className = "macro-item";
     if (!target.allowOver && targetValue > 0 && current > targetValue) {
       item.classList.add("is-over");
     }
 
     const label = document.createElement("span");
     label.className = "macro-label";
-    label.textContent = target.label;
+    label.textContent = getTargetLabel(target.key);
 
     const value = document.createElement("h3");
-    value.textContent = `${formatNumber(current)}${unit}`;
+    const baseText = formatNutrientDisplay(current, unit);
+    if (showImpact && impactValue !== 0) {
+      const impactSpan = document.createElement("span");
+      impactSpan.className = "impact-inline";
+      if (!target.allowOver && targetValue > 0 && projectedValue > targetValue) {
+        impactSpan.classList.add("is-over");
+      }
+      impactSpan.textContent = formatImpactValue(impactValue, unit);
+      value.replaceChildren(baseText, " ", impactSpan);
+    } else {
+      value.textContent = baseText;
+    }
 
     const progress = document.createElement("div");
     progress.className = "progress small";
@@ -2261,7 +2692,10 @@ const renderCustomTargetsPanel = () => {
     const meta = document.createElement("span");
     meta.className = "meta";
     const suffix = target.allowOver ? "+" : "";
-    meta.textContent = `Target: ${formatNumber(targetValue)}${unit}${suffix}`;
+    meta.textContent = `Target: ${formatNutrientDisplay(
+      targetValue,
+      unit
+    )}${suffix}`;
 
     item.append(label, value, progress, meta);
     elements.customTargetsList.appendChild(item);
@@ -2316,23 +2750,7 @@ const renderCustomTargetList = () => {
     return;
   }
   const targets = state.customTargets || [];
-  const coreOrder = new Map(
-    CORE_TARGET_OPTIONS.map((option, index) => [option.key, index])
-  );
-  const orderedTargets = [...targets].sort((a, b) => {
-    const aCore = coreOrder.has(a.key);
-    const bCore = coreOrder.has(b.key);
-    if (aCore && bCore) {
-      return coreOrder.get(a.key) - coreOrder.get(b.key);
-    }
-    if (aCore) {
-      return -1;
-    }
-    if (bCore) {
-      return 1;
-    }
-    return a.label.localeCompare(b.label);
-  });
+  const orderedTargets = [...targets];
   elements.customTargetList.innerHTML = "";
   if (!orderedTargets.length) {
     const empty = document.createElement("p");
@@ -2351,7 +2769,7 @@ const renderCustomTargetList = () => {
 
     const label = document.createElement("label");
     label.className = "custom-target-label";
-    const unit = target.unit || getTargetOption(target.key)?.unit || "";
+    const unit = getTargetUnit(target.key);
     label.textContent = unit ? `${target.label} (${unit})` : target.label;
 
     const editButton = document.createElement("button");
@@ -2391,90 +2809,74 @@ const renderCustomTargetList = () => {
     input.id = inputId;
     label.setAttribute("for", inputId);
 
-    const deleteButton = document.createElement("button");
-    deleteButton.type = "button";
-    setupDeleteButton(deleteButton, { label: `Delete ${target.label} target` });
-    deleteButton.addEventListener("click", async () => {
+    const archiveButton = document.createElement("button");
+    archiveButton.type = "button";
+    setupArchiveButton(archiveButton, {
+      label: `Archive ${target.label} target`,
+    });
+    archiveButton.addEventListener("click", async () => {
       const statusEl = elements.targetStatus || elements.customTargetStatus;
       const confirmed = await confirmDialog({
-        title: "Delete target",
-        message: `Delete the ${target.label} target?`,
+        title: "Archive target",
+        message: `Archive the ${target.label} target?`,
+        confirmText: "Archive",
+        confirmTone: "primary",
       });
       if (!confirmed) {
         return;
       }
       try {
-        setStatus(statusEl, "Deleting...");
+        setStatus(statusEl, "Archiving...");
         await api(`/api/custom-targets/${target.id}`, { method: "DELETE" });
         await refreshData();
-        setStatus(statusEl, "Target deleted.");
+        setStatus(statusEl, "Target archived.");
       } catch (error) {
         setStatus(statusEl, error.message, "error");
       }
     });
 
-    fieldRow.append(input, deleteButton);
+    fieldRow.append(input, archiveButton);
     entry.append(header, fieldRow);
     elements.customTargetList.appendChild(entry);
   });
 };
 
-const formatImpactValue = (value, unit, precision = 1) => {
+const formatImpactValue = (value, unit) => {
   const safeValue = Number.isFinite(value) ? value : 0;
   const sign = safeValue >= 0 ? "+" : "";
-  return `${sign}${formatNumber(safeValue, precision)}${unit}`;
+  return `${sign}${formatNutrientDisplay(safeValue, unit)}`;
 };
 
-const createImpactTotals = () => {
-  const totals = { calories: 0, protein: 0, carbs: 0, fat: 0 };
-  CUSTOM_TARGET_OPTIONS.forEach((target) => {
-    totals[target.key] = 0;
-  });
-  return totals;
-};
+const createImpactTotals = () => createTotals(getTrackedTargetKeys());
 
 const setLogImpactValues = (impact) => {
-  if (elements.logImpactCalories) {
-    elements.logImpactCalories.textContent = formatImpactValue(
-      impact.calories,
-      " cal",
-      0
-    );
-  }
-  if (elements.logImpactProtein) {
-    elements.logImpactProtein.textContent = formatImpactValue(
-      impact.protein,
-      "g"
-    );
-  }
-  if (elements.logImpactCarbs) {
-    elements.logImpactCarbs.textContent = formatImpactValue(impact.carbs, "g");
-  }
-  if (elements.logImpactFat) {
-    elements.logImpactFat.textContent = formatImpactValue(impact.fat, "g");
-  }
+  const logImpactElements = getTargetElementMap(
+    "[id^='log-impact-']",
+    "log-impact-"
+  );
+  logImpactElements.forEach((element, key) => {
+    const unit = getTargetUnit(key);
+    const suffix = getElementUnitSuffix(element, unit);
+    element.textContent = formatImpactValue(impact?.[key], suffix);
+  });
 };
 
 const updateLogImpact = () => {
-  if (!elements.logImpactCard || !elements.logForm || !elements.logItem) {
+  if (!elements.logForm || !elements.logItem) {
     return;
   }
   const emptyImpact = createImpactTotals();
-  const warnCarbsOver = !state.targets?.carbsAllowOver;
-  const warnFatOver = !state.targets?.fatAllowOver;
-  if (elements.logItem.disabled) {
+  const baseTotals = getSelectedDayTotals();
+  const resetImpact = (message, tone) => {
     setLogImpactValues(emptyImpact);
     state.logImpact = emptyImpact;
-    setImpactBar(elements.caloriesImpactProgress, 0, state.targets?.calories);
-    setImpactBar(elements.proteinImpactProgress, 0, state.targets?.protein);
-    setImpactBar(elements.carbsImpactProgress, 0, state.targets?.carbs, {
-      warnOver: warnCarbsOver,
-    });
-    setImpactBar(elements.fatImpactProgress, 0, state.targets?.fat, {
-      warnOver: warnFatOver,
-    });
-    setStatus(elements.logImpactNote, "Select an item to preview.");
+    setImpactBars(emptyImpact);
+    setStatus(elements.logImpactNote, message, tone);
     renderCustomTargetsPanel();
+    renderTodayTotals(baseTotals, emptyImpact);
+  };
+  if (elements.logItem.disabled) {
+    resetImpact("Select an item to preview.");
     return;
   }
 
@@ -2483,18 +2885,7 @@ const updateLogImpact = () => {
   )?.value;
   const itemId = Number(elements.logItem.value);
   if (!type || !Number.isFinite(itemId)) {
-    setLogImpactValues(emptyImpact);
-    state.logImpact = emptyImpact;
-    setImpactBar(elements.caloriesImpactProgress, 0, state.targets?.calories);
-    setImpactBar(elements.proteinImpactProgress, 0, state.targets?.protein);
-    setImpactBar(elements.carbsImpactProgress, 0, state.targets?.carbs, {
-      warnOver: warnCarbsOver,
-    });
-    setImpactBar(elements.fatImpactProgress, 0, state.targets?.fat, {
-      warnOver: warnFatOver,
-    });
-    setStatus(elements.logImpactNote, "Select an item to preview.");
-    renderCustomTargetsPanel();
+    resetImpact("Select an item to preview.");
     return;
   }
 
@@ -2502,181 +2893,64 @@ const updateLogImpact = () => {
   const unitField = elements.logForm.querySelector("[name='unit']");
   const quantity = Math.max(parseNumeric(quantityField?.value, 1), 0);
   const unit = String(unitField?.value ?? "").trim();
-  let impact = emptyImpact;
-  let note = "";
+  let source = null;
+  let normalizedQuantity = 0;
 
   if (type === "ingredient") {
     const ingredient = state.ingredients.find((item) => item.id === itemId);
     if (!ingredient) {
-      setLogImpactValues(emptyImpact);
-      state.logImpact = emptyImpact;
-      setImpactBar(elements.caloriesImpactProgress, 0, state.targets?.calories);
-      setImpactBar(elements.proteinImpactProgress, 0, state.targets?.protein);
-      setImpactBar(elements.carbsImpactProgress, 0, state.targets?.carbs, {
-        warnOver: warnCarbsOver,
-      });
-      setImpactBar(elements.fatImpactProgress, 0, state.targets?.fat, {
-        warnOver: warnFatOver,
-      });
-      setStatus(elements.logImpactNote, "Ingredient not found.", "error");
-      renderCustomTargetsPanel();
+      resetImpact("Ingredient not found.", "error");
       return;
     }
     const normalized = normalizeIngredientQuantity(ingredient, quantity, unit);
     if (normalized.error) {
-      setLogImpactValues(emptyImpact);
-      state.logImpact = emptyImpact;
-      setImpactBar(elements.caloriesImpactProgress, 0, state.targets?.calories);
-      setImpactBar(elements.proteinImpactProgress, 0, state.targets?.protein);
-      setImpactBar(elements.carbsImpactProgress, 0, state.targets?.carbs, {
-        warnOver: warnCarbsOver,
-      });
-      setImpactBar(elements.fatImpactProgress, 0, state.targets?.fat, {
-        warnOver: warnFatOver,
-      });
-      setStatus(elements.logImpactNote, normalized.error, "error");
-      renderCustomTargetsPanel();
+      resetImpact(normalized.error, "error");
       return;
     }
-    impact = {
-      calories: parseNumeric(ingredient.calories, 0) * normalized.quantity,
-      protein: parseNumeric(ingredient.protein, 0) * normalized.quantity,
-      carbs: parseNumeric(ingredient.carbs, 0) * normalized.quantity,
-      fat: parseNumeric(ingredient.fat, 0) * normalized.quantity,
-    };
-    CUSTOM_TARGET_OPTIONS.forEach((target) => {
-      impact[target.key] =
-        parseNumeric(ingredient[target.key], 0) * normalized.quantity;
-    });
+    source = ingredient;
+    normalizedQuantity = normalized.quantity;
   } else if (type === "food") {
     const food = state.foods.find((item) => item.id === itemId);
     if (!food) {
-      setLogImpactValues(emptyImpact);
-      state.logImpact = emptyImpact;
-      setImpactBar(elements.caloriesImpactProgress, 0, state.targets?.calories);
-      setImpactBar(elements.proteinImpactProgress, 0, state.targets?.protein);
-      setImpactBar(elements.carbsImpactProgress, 0, state.targets?.carbs, {
-        warnOver: warnCarbsOver,
-      });
-      setImpactBar(elements.fatImpactProgress, 0, state.targets?.fat, {
-        warnOver: warnFatOver,
-      });
-      setStatus(elements.logImpactNote, "Food not found.", "error");
-      renderCustomTargetsPanel();
+      resetImpact("Food not found.", "error");
       return;
     }
     const normalized = normalizeIngredientQuantity(food, quantity, unit);
     if (normalized.error) {
-      setLogImpactValues(emptyImpact);
-      state.logImpact = emptyImpact;
-      setImpactBar(elements.caloriesImpactProgress, 0, state.targets?.calories);
-      setImpactBar(elements.proteinImpactProgress, 0, state.targets?.protein);
-      setImpactBar(elements.carbsImpactProgress, 0, state.targets?.carbs, {
-        warnOver: warnCarbsOver,
-      });
-      setImpactBar(elements.fatImpactProgress, 0, state.targets?.fat, {
-        warnOver: warnFatOver,
-      });
-      setStatus(elements.logImpactNote, normalized.error, "error");
-      renderCustomTargetsPanel();
+      resetImpact(normalized.error, "error");
       return;
     }
-    impact = {
-      calories: parseNumeric(food.calories, 0) * normalized.quantity,
-      protein: parseNumeric(food.protein, 0) * normalized.quantity,
-      carbs: parseNumeric(food.carbs, 0) * normalized.quantity,
-      fat: parseNumeric(food.fat, 0) * normalized.quantity,
-    };
-    CUSTOM_TARGET_OPTIONS.forEach((target) => {
-      impact[target.key] =
-        parseNumeric(food[target.key], 0) * normalized.quantity;
-    });
+    source = food;
+    normalizedQuantity = normalized.quantity;
   } else {
     const recipe = state.recipes.find((item) => item.id === itemId);
     if (!recipe?.nutrition?.perServing) {
-      setLogImpactValues(emptyImpact);
-      state.logImpact = emptyImpact;
-      setImpactBar(elements.caloriesImpactProgress, 0, state.targets?.calories);
-      setImpactBar(elements.proteinImpactProgress, 0, state.targets?.protein);
-      setImpactBar(elements.carbsImpactProgress, 0, state.targets?.carbs, {
-        warnOver: warnCarbsOver,
-      });
-      setImpactBar(elements.fatImpactProgress, 0, state.targets?.fat, {
-        warnOver: warnFatOver,
-      });
-      setStatus(elements.logImpactNote, "Recipe data unavailable.", "error");
-      renderCustomTargetsPanel();
+      resetImpact("Recipe data unavailable.", "error");
       return;
     }
     const normalized = normalizeRecipeQuantity(quantity, unit);
     if (normalized.error) {
-      setLogImpactValues(emptyImpact);
-      state.logImpact = emptyImpact;
-      setImpactBar(elements.caloriesImpactProgress, 0, state.targets?.calories);
-      setImpactBar(elements.proteinImpactProgress, 0, state.targets?.protein);
-      setImpactBar(elements.carbsImpactProgress, 0, state.targets?.carbs, {
-        warnOver: warnCarbsOver,
-      });
-      setImpactBar(elements.fatImpactProgress, 0, state.targets?.fat, {
-        warnOver: warnFatOver,
-      });
-      setStatus(elements.logImpactNote, normalized.error, "error");
-      renderCustomTargetsPanel();
+      resetImpact(normalized.error, "error");
       return;
     }
-    impact = {
-      calories:
-        parseNumeric(recipe.nutrition.perServing.calories, 0) *
-        normalized.quantity,
-      protein:
-        parseNumeric(recipe.nutrition.perServing.protein, 0) *
-        normalized.quantity,
-      carbs:
-        parseNumeric(recipe.nutrition.perServing.carbs, 0) *
-        normalized.quantity,
-      fat:
-        parseNumeric(recipe.nutrition.perServing.fat, 0) * normalized.quantity,
-    };
-    CUSTOM_TARGET_OPTIONS.forEach((target) => {
-      impact[target.key] =
-        parseNumeric(recipe.nutrition.perServing[target.key], 0) *
-        normalized.quantity;
-    });
+    source = recipe.nutrition.perServing;
+    normalizedQuantity = normalized.quantity;
   }
 
+  const impact = createImpactTotals();
+  addTotals(impact, source, normalizedQuantity, getTrackedTargetKeys());
   setLogImpactValues(impact);
   state.logImpact = impact;
-  const totals = getSelectedDayTotals();
-  const projected = {
-    calories: totals.calories + impact.calories,
-    protein: totals.protein + impact.protein,
-    carbs: totals.carbs + impact.carbs,
-    fat: totals.fat + impact.fat,
-  };
-  setImpactBar(
-    elements.caloriesImpactProgress,
-    projected.calories,
-    state.targets?.calories
-  );
-  setImpactBar(
-    elements.proteinImpactProgress,
-    projected.protein,
-    state.targets?.protein
-  );
-  setImpactBar(
-    elements.carbsImpactProgress,
-    projected.carbs,
-    state.targets?.carbs,
-    { warnOver: !state.targets?.carbsAllowOver }
-  );
-  setImpactBar(
-    elements.fatImpactProgress,
-    projected.fat,
-    state.targets?.fat,
-    { warnOver: !state.targets?.fatAllowOver }
-  );
-  setStatus(elements.logImpactNote, note);
+  const primaryKeys = getPrimaryTargetKeys();
+  const projected = createTotals(primaryKeys);
+  primaryKeys.forEach((key) => {
+    projected[key] =
+      parseNumeric(baseTotals?.[key], 0) + parseNumeric(impact?.[key], 0);
+  });
+  setImpactBars(projected);
+  setStatus(elements.logImpactNote, "");
   renderCustomTargetsPanel();
+  renderTodayTotals(baseTotals, impact);
 };
 
 const renderLogSelect = () => {
@@ -2741,11 +3015,16 @@ const refreshData = async () => {
   state.recipes = recipes;
   state.logs = logs;
   state.customTargets = customTargets;
-  state.targets = deriveCoreTargets(customTargets);
+  state.targetLookup = new Map(
+    (customTargets || []).map((target) => [target.key, target])
+  );
+  updateExtraNutrientSelect();
+  updateFoodExtraNutrientSelect();
 
   renderIngredients();
   renderFoods();
-  renderRecipeItems();
+  setRecipeFormMode(null);
+  renderRecipeIngredientList();
   renderRecipes();
   renderLogSelect();
   renderLogList();
@@ -2774,36 +3053,8 @@ const applyIngredientData = (data, options = {}) => {
   if (!data) {
     return;
   }
-  setIngredientFieldValue("name", data.name, options);
-  setIngredientFieldValue("barcode", data.barcode || "", options);
-  setIngredientFieldValue("calories", data.calories, options);
-  setIngredientFieldValue("protein", data.protein, options);
-  setIngredientFieldValue("carbs", data.carbs, options);
-  setIngredientFieldValue("fat", data.fat, options);
-  setIngredientFieldValue("unit", data.unit, options);
-  setIngredientFieldValue("ingredientsList", data.ingredientsList, options);
-  setIngredientFieldValue("vitamins", data.vitamins, options);
-  setIngredientFieldValue("allergens", data.allergens, options);
-  setIngredientFieldValue("servingSize", data.servingSize, options);
-  setIngredientFieldValue(
-    "servingsPerContainer",
-    data.servingsPerContainer,
-    options
-  );
-
-  const extraValues = {
-    saturatedFat: data.saturatedFat,
-    transFat: data.transFat,
-    cholesterolMg: data.cholesterolMg,
-    sodiumMg: data.sodiumMg,
-    dietaryFiber: data.dietaryFiber,
-    totalSugars: data.totalSugars,
-    addedSugars: data.addedSugars,
-    vitaminDMcg: data.vitaminDMcg,
-    calciumMg: data.calciumMg,
-    ironMg: data.ironMg,
-    potassiumMg: data.potassiumMg,
-  };
+  applyLibraryFieldValues(setIngredientFieldValue, data, options);
+  const extraValues = buildExtraNutrientValues(data);
 
   if (elements.extraNutrients) {
     resetExtraNutrients();
@@ -2935,32 +3186,9 @@ const applyFoodData = (data, options = {}) => {
   if (!data) {
     return;
   }
-  setFoodFieldValue("name", data.name, options);
-  setFoodFieldValue("barcode", data.barcode || "", options);
-  setFoodFieldValue("calories", data.calories, options);
-  setFoodFieldValue("protein", data.protein, options);
-  setFoodFieldValue("carbs", data.carbs, options);
-  setFoodFieldValue("fat", data.fat, options);
-  setFoodFieldValue("unit", data.unit, options);
-  setFoodFieldValue("ingredientsList", data.ingredientsList, options);
-  setFoodFieldValue("vitamins", data.vitamins, options);
-  setFoodFieldValue("allergens", data.allergens, options);
-  setFoodFieldValue("servingSize", data.servingSize, options);
-  setFoodFieldValue("servingsPerContainer", data.servingsPerContainer, options);
 
-  const extraValues = {
-    saturatedFat: data.saturatedFat,
-    transFat: data.transFat,
-    cholesterolMg: data.cholesterolMg,
-    sodiumMg: data.sodiumMg,
-    dietaryFiber: data.dietaryFiber,
-    totalSugars: data.totalSugars,
-    addedSugars: data.addedSugars,
-    vitaminDMcg: data.vitaminDMcg,
-    calciumMg: data.calciumMg,
-    ironMg: data.ironMg,
-    potassiumMg: data.potassiumMg,
-  };
+  applyLibraryFieldValues(setFoodFieldValue, data, options);
+  const extraValues = buildExtraNutrientValues(data);
 
   if (elements.foodExtraNutrients) {
     resetFoodExtraNutrients();
@@ -3067,6 +3295,15 @@ const handleFoodBarcodeDetected = async (barcode) => {
   }
 };
 
+const handleRecipeIngredientBarcodeDetected = (barcode) => {
+  setRecipePanelMode("ingredients");
+  if (elements.recipeIngredientSearch) {
+    elements.recipeIngredientSearch.value = barcode;
+  }
+  renderRecipeIngredientList();
+  setStatus(elements.scanStatus, `Detected barcode ${barcode}`);
+};
+
 const setupScan = () => {
   if (!elements.scanModal || !elements.scanVideo || !elements.closeScan) {
     return;
@@ -3109,6 +3346,8 @@ const setupScan = () => {
         const barcode = barcodes[0].rawValue;
         if (scanTarget === "food") {
           await handleFoodBarcodeDetected(barcode);
+        } else if (scanTarget === "recipe-ingredient") {
+          handleRecipeIngredientBarcodeDetected(barcode);
         } else {
           await handleBarcodeDetected(barcode);
         }
@@ -3167,6 +3406,8 @@ const setupScan = () => {
             const barcode = result.getText();
             if (scanTarget === "food") {
               await handleFoodBarcodeDetected(barcode);
+            } else if (scanTarget === "recipe-ingredient") {
+              handleRecipeIngredientBarcodeDetected(barcode);
             } else {
               await handleBarcodeDetected(barcode);
             }
@@ -3420,13 +3661,35 @@ const wireForms = () => {
     });
   }
 
+  qsa("[data-recipe-panel]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const panel = button.dataset.recipePanel;
+      setRecipePanelMode(panel);
+    });
+  });
+
+  if (elements.recipeIngredientSearch) {
+    elements.recipeIngredientSearch.addEventListener(
+      "input",
+      renderRecipeIngredientList
+    );
+  }
+
   if (elements.addRecipeItem) {
     elements.addRecipeItem.addEventListener("click", () => {
       if (!state.ingredients.length) {
         setStatus(elements.recipeStatus, "Add ingredients first.", "error");
         return;
       }
-      addRecipeRow();
+      setRecipePanelMode("ingredients");
+      elements.recipeIngredientSearch?.focus();
+    });
+  }
+
+  if (elements.recipeCancel) {
+    elements.recipeCancel.addEventListener("click", () => {
+      setRecipeFormMode(null);
+      setStatus(elements.recipeStatus, "Edit cancelled.");
     });
   }
 
@@ -3434,16 +3697,26 @@ const wireForms = () => {
     elements.recipeForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const formData = new FormData(event.target);
-      const items = Array.from(
-        elements.recipeItems?.querySelectorAll(".recipe-item-row") || []
-      ).map((row) => {
-        const [select, quantity, unit] = row.querySelectorAll("select, input");
-        return {
-          ingredientId: Number(select.value),
-          quantity: Number(quantity.value || 1),
-          unit: unit.value || "unit",
-        };
-      });
+      const items = getRecipeRows()
+        .map((row) => {
+          const ingredientId = Number(row.dataset.ingredientId);
+          if (!Number.isFinite(ingredientId)) {
+            return null;
+          }
+          const quantityInput = row.querySelector(".recipe-quantity");
+          const unitInput = row.querySelector(".recipe-unit");
+          return {
+            ingredientId,
+            quantity: Number(quantityInput?.value || 1),
+            unit: unitInput?.value || "unit",
+          };
+        })
+        .filter(Boolean);
+
+      if (!items.length) {
+        setStatus(elements.recipeStatus, "Add ingredients first.", "error");
+        return;
+      }
 
       const payload = {
         name: formData.get("name"),
@@ -3453,15 +3726,22 @@ const wireForms = () => {
       };
 
       try {
+        const wasEditing = Boolean(editingRecipeId);
         setStatus(elements.recipeStatus, "Saving...");
-        await api("/api/recipes", { method: "POST", body: payload });
-        event.target.reset();
-        if (elements.recipeItems) {
-          elements.recipeItems.innerHTML = "";
+        if (editingRecipeId) {
+          await api(`/api/recipes/${editingRecipeId}`, {
+            method: "PUT",
+            body: payload,
+          });
+        } else {
+          await api("/api/recipes", { method: "POST", body: payload });
         }
-        renderRecipeItems();
+        setRecipeFormMode(null);
         await refreshData();
-        setStatus(elements.recipeStatus, "Recipe saved.");
+        setStatus(
+          elements.recipeStatus,
+          wasEditing ? "Recipe updated." : "Recipe saved."
+        );
       } catch (error) {
         setStatus(elements.recipeStatus, error.message, "error");
       }
@@ -3599,8 +3879,8 @@ const wireForms = () => {
           );
           return;
         }
-        const isCore = isCoreTargetKey(existing.key);
-        if (!isCore && (parsedTarget.value === null || parsedTarget.value <= 0)) {
+        const isOptional = isOptionalTargetKey(existing.key);
+        if (!isOptional && (parsedTarget.value === null || parsedTarget.value <= 0)) {
           setStatus(
             elements.targetStatus,
             `${label} must be greater than 0 (append + to allow overage).`,
@@ -3655,16 +3935,16 @@ const wireForms = () => {
       event.preventDefault();
       const formData = new FormData(event.target);
       const key = String(formData.get("key") || "").trim();
-      const option = getTargetOption(key);
+      const option = getCatalogTargetOption(key);
       if (!key || !option) {
         setStatus(elements.customTargetStatus, "Select a target.", "error");
         return;
       }
-      const isCore = isCoreTargetKey(key);
+      const isOptional = isOptionalTargetKey(key);
       const payload = {
         key,
         label: option.label || "Custom target",
-        target: isCore ? null : DEFAULT_CUSTOM_TARGET_VALUE,
+        target: isOptional ? null : DEFAULT_CUSTOM_TARGET_VALUE,
         allowOver: false,
       };
 

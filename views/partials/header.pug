@@ -1,0 +1,15 @@
+header.site-header
+  .brand
+    img.brand-icon(src="/favicons/favicon-32x32.png" alt="" aria-hidden="true")
+    span= appName
+  button.nav-toggle(type="button" data-nav-toggle aria-expanded="false" aria-controls="site-nav")
+    span.nav-toggle-icon(aria-hidden="true")
+    span.nav-toggle-label Menu
+  nav.nav-links#site-nav
+    a(class=active === "dashboard" ? "active" : "" href="/") Dashboard
+    a(class=active === "ingredients" ? "active" : "" href="/ingredients") Ingredients
+    a(class=active === "foods" ? "active" : "" href="/foods") Foods
+    a(class=active === "recipes" ? "active" : "" href="/recipes") Recipes
+    a(class=active === "log" ? "active" : "" href="/log") Log Intake
+    a(class=active === "settings" ? "active" : "" href="/settings") Settings
+    button.nav-logout#logout-button(type="button") Log out

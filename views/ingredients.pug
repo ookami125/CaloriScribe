@@ -1,0 +1,91 @@
+doctype html
+html(lang="en")
+  include partials/head
+  body
+    .ambient
+    include partials/header
+
+    main.page
+      section.panel
+        .panel-header
+          div
+            h1 Ingredient library
+            p Capture barcodes, nutrition facts, and label details.
+          .panel-actions
+            button.primary(type="button" data-scan-trigger data-scan-target="ingredient") Scan barcode
+        .panel-body.split
+          form#ingredient-form.stacked-card
+            h3#ingredient-form-title Add ingredient
+            input#ingredient-id(type="hidden" name="id")
+            .grid.two
+              label
+                | Name
+                input(type="text" name="name" required)
+              label
+                | Barcode
+                .field-row
+                  input#barcode-input(type="text" name="barcode")
+                  button.ghost#barcode-lookup(type="button") Lookup
+              label
+                | Unit (g, ml, tbsp, piece)
+                input(type="text" name="unit" required)
+              label
+                | Serving size (label)
+                input(type="text" name="servingSize" placeholder="1 cup (240 ml)")
+              label
+                | Servings per container
+                input(type="text" name="servingsPerContainer" placeholder="about 8")
+            .form-section
+              h4 Nutrition facts per unit
+              .grid.three
+                label
+                  | Calories
+                  input(type="number" name="calories" step="0.01" required)
+                label
+                  | Total fat (g)
+                  input(type="number" name="fat" step="0.01" required)
+                label
+                  | Total carbs (g)
+                  input(type="number" name="carbs" step="0.01" required)
+                label
+                  | Protein (g)
+                  input(type="number" name="protein" step="0.01" required)
+              .add-nutrient-row
+                label
+                  | Additional facts
+                  select#extra-nutrient-select
+                button.ghost#add-nutrient(type="button") Add nutrient
+              .grid.three#extra-nutrients
+            label
+              | Ingredients list
+              textarea(name="ingredientsList" rows="3")
+            label
+              | Other vitamins & minerals
+              textarea(name="vitamins" rows="2")
+            label
+              | Allergens
+              textarea(name="allergens" rows="2")
+            .form-actions
+              button.primary#ingredient-submit(type="submit") Save ingredient
+              button.ghost#ingredient-cancel(type="button" hidden) Cancel edit
+            p.form-status#ingredient-status
+          div
+            .panel-tools
+              input#ingredient-search(type="search" placeholder="Search ingredients")
+            .list.scroll#ingredient-list
+
+    .modal#scan-modal(aria-hidden="true")
+      .modal-card
+        .modal-header
+          h3 Scan barcode
+          button.ghost#close-scan(type="button") Close
+        .scan-area
+          video#scan-video(autoplay playsinline)
+          .scan-target
+        p.form-status#scan-status
+
+    include partials/card-templates
+    include partials/confirm-modal
+
+    script(src="https://unpkg.com/@zxing/library@0.21.2/umd/index.min.js")
+    script(src="/app.js")

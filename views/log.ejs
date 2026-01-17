@@ -16,27 +16,6 @@
         <div class="hero-grid">
           <%- include("partials/calories-panel") %>
           <%- include("partials/macro-split-panel") %>
-          <div class="stat-card" id="log-impact-card">
-            <span class="eyebrow">Next log impact</span>
-            <h2 id="log-impact-calories">+0 cal</h2>
-            <div class="macro-grid">
-              <div class="macro-item">
-                <span class="macro-label">Protein</span>
-                <h3 id="log-impact-protein">+0g</h3>
-              </div>
-              <div class="macro-item">
-                <span class="macro-label">Carbs</span>
-                <h3 id="log-impact-carbs">+0g</h3>
-              </div>
-              <div class="macro-item">
-                <span class="macro-label">Fat</span>
-                <h3 id="log-impact-fat">+0g</h3>
-              </div>
-            </div>
-            <p class="meta" id="log-impact-note">
-              Select an item to preview.
-            </p>
-          </div>
         </div>
       </section>
       <section class="panel">
@@ -47,7 +26,7 @@
           </div>
         </div>
         <div class="panel-body split">
-          <form id="log-form" class="stacked-card">
+          <form id="log-form" class="stacked-card" style="height: fit-content;">
             <h3>Add log entry</h3>
             <div class="toggle" role="radiogroup" aria-label="Log type">
               <label>
