@@ -1,0 +1,94 @@
+<div class="ambient"></div>
+{{{header}}}
+<div class="ui-fill ui-scroll">
+  <main class="page">
+    <section class="panel" id="recipe-editor-panel">
+      <div class="panel-header">
+        <div>
+          <h1>Recipe builder</h1>
+          <p>Combine ingredients and check macros before you log.</p>
+        </div>
+      </div>
+      <div class="stacked-section">
+        <div class="panel-header">
+          <div>
+            <h2>Daily overview</h2>
+            <p>Today's totals with one serving of this recipe.</p>
+          </div>
+        </div>
+        <div class="hero-grid">
+          {{{caloriesPanel}}}
+          {{{macroSplitPanel}}}
+        </div>
+      </div>
+      <div class="panel-body split">
+        <form id="recipe-form" class="stacked-card">
+          <h3 id="recipe-form-title">Create recipe</h3>
+          <div class="grid two">
+            <label>
+              Recipe name
+              <input type="text" name="name" required>
+            </label>
+            <label>
+              Servings
+              <input type="number" name="servings" min="1" value="1">
+            </label>
+          </div>
+          <label>
+            Notes
+            <textarea name="notes" rows="3"></textarea>
+          </label>
+          <div class="recipe-items" id="recipe-items"></div>
+          <div class="form-actions">
+            <button class="ghost" id="add-recipe-item" type="button">Find ingredient</button>
+            <button class="ghost" id="recipe-cancel" type="button" hidden>Cancel edit</button>
+          </div>
+          <button class="primary" id="recipe-submit" type="submit">Create recipe</button>
+          <p class="form-status" id="recipe-status"></p>
+        </form>
+        <div class="recipe-side">
+          <div class="panel-tabs" role="tablist" aria-label="Recipe panels">
+            <button class="tab-button is-active" id="recipe-panel-recipes" type="button" data-recipe-panel="recipes">Recipes</button>
+            <button class="tab-button" id="recipe-panel-ingredients" type="button" data-recipe-panel="ingredients">Ingredients</button>
+          </div>
+          <div id="recipe-list-panel">
+            <div class="list scroll" id="recipe-list"></div>
+          </div>
+          <div id="recipe-ingredients-panel" hidden>
+            <div class="stacked-card">
+              <h3>Ingredient library</h3>
+              <label>
+                Search name or barcode
+                <div class="field-row">
+                  <input id="recipe-ingredient-search" type="search" name="recipe-ingredient-search" placeholder="e.g. oats or 0123456789">
+                  <button class="ghost" type="button" data-scan-trigger data-scan-target="recipe-ingredient">Scan barcode</button>
+                </div>
+              </label>
+            </div>
+            <div class="list scroll" id="recipe-ingredient-list"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="modal" id="scan-modal" aria-hidden="true">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h3>Scan barcode</h3>
+      <button class="ghost" id="close-scan" type="button">Close</button>
+    </div>
+    <div class="scan-area">
+      <video id="scan-video" autoplay playsinline></video>
+      <div class="scan-target"></div>
+    </div>
+    <p class="form-status" id="scan-status"></p>
+  </div>
+</div>
+
+{{{cardTemplates}}}
+{{{confirmModal}}}
+
+<script src="https://unpkg.com/@zxing/library@0.21.2/umd/index.min.js"></script>
+<script src="/app.js"></script>

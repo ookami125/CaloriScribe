@@ -4,6 +4,7 @@ const https = require("https");
 const crypto = require("crypto");
 const path = require("path");
 const express = require("express");
+const { nativeSSRUI } = require("native-ssr-ui");
 const { FoodDatabase } = require("./external/FoodDatabase/src/foodDatabase");
 const { AuthDatabase } = require("./lib/auth-db");
 const { hashPassword, verifyPassword } = require("./lib/auth");
@@ -71,11 +72,31 @@ const authDb = new AuthDatabase({
   filename: resolveSqlitePath(process.env.AUTH_DATABASE_URL, "auth.db"),
 });
 
-app.set("view engine", "pug");
-app.set("views", path.join(__dirname, "views"));
+const SSR_VIEW_DIR = path.join(__dirname, "views", "appssr");
+const SSR_PARTIAL_DIR = path.join(SSR_VIEW_DIR, "partials");
+const HEAD_EXTRA = `
+<link rel="icon" href="/favicons/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" href="/favicons/favicon-32x32.png" sizes="32x32">
+<link rel="icon" type="image/png" href="/favicons/favicon-48x48.png" sizes="48x48">
+<link rel="icon" type="image/png" href="/favicons/favicon-64x64.png" sizes="64x64">
+<link rel="icon" type="image/png" href="/favicons/favicon-96x96.png" sizes="96x96">
+<link rel="icon" type="image/png" href="/favicons/favicon-128x128.png" sizes="128x128">
+<link rel="icon" type="image/png" href="/favicons/android-chrome-192x192.png" sizes="192x192">
+<link rel="icon" type="image/png" href="/favicons/android-chrome-512x512.png" sizes="512x512">
+<link rel="icon" type="image/png" href="/favicons/favicon-16x16.png" sizes="16x16">
+<link rel="apple-touch-icon" href="/favicons/apple-touch-icon-180x180.png">
+<link rel="manifest" href="/favicons/site.webmanifest">
+<meta name="theme-color" content="#ffffff">
+<meta name="msapplication-TileImage" content="/favicons/mstile-150x150.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+`;
 
 app.use(express.json({ limit: "10mb" }));
 app.set("trust proxy", 1);
+app.use(nativeSSRUI());
 
 const asyncHandler = (handler) => (req, res, next) =>
   Promise.resolve(handler(req, res, next)).catch(next);
@@ -142,12 +163,42 @@ const requirePageAuth = (req, res, next) => {
   return next();
 };
 
-const renderPage = (res, view, { title, active } = {}) => {
-  res.render(view, {
-    title: title || APP_NAME,
-    active: active || "",
+const buildNavClasses = (active = "") => ({
+  dashboardClass: active === "dashboard" ? "active" : "",
+  ingredientsClass: active === "ingredients" ? "active" : "",
+  foodsClass: active === "foods" ? "active" : "",
+  recipesClass: active === "recipes" ? "active" : "",
+  logClass: active === "log" ? "active" : "",
+  settingsClass: active === "settings" ? "active" : "",
+});
+
+const renderPartial = (res, fileName, data = {}) => {
+  const { templateFile, raw } = res.locals.ui;
+  const filePath = path.join(SSR_PARTIAL_DIR, fileName);
+  return raw(templateFile(filePath, data));
+};
+
+const buildTemplateData = (res, active) => ({
+  appName: APP_NAME,
+  header: renderPartial(res, "header.html", {
     appName: APP_NAME,
+    ...buildNavClasses(active),
+  }),
+  caloriesPanel: renderPartial(res, "calories-panel.html"),
+  macroSplitPanel: renderPartial(res, "macro-split-panel.html"),
+  cardTemplates: renderPartial(res, "card-templates.html"),
+  confirmModal: renderPartial(res, "confirm-modal.html"),
+  editTargetModal: renderPartial(res, "edit-target-modal.html"),
+});
+
+const renderPage = (res, view, { title, active } = {}) => {
+  const { page, templateFile } = res.locals.ui;
+  const body = templateFile(path.join(SSR_VIEW_DIR, `${view}.html`), {
+    ...buildTemplateData(res, active),
   });
+  res
+    .type("html")
+    .send(page({ title: title || APP_NAME, headExtra: HEAD_EXTRA, body }));
 };
 
 app.use(attachUser);

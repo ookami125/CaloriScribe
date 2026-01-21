@@ -1,0 +1,33 @@
+<div class="ambient"></div>
+<div class="ui-fill ui-scroll">
+  <main class="page">
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Welcome back</p>
+          <h1 class="brand-title">
+            <img class="brand-icon" src="/favicons/favicon-32x32.png" alt="" aria-hidden="true">
+            <span>{{appName}}</span>
+          </h1>
+          <p>Sign in to access your dashboard.</p>
+        </div>
+      </div>
+      <div class="panel-body">
+        <form id="login-form" class="stacked-card">
+          <label>
+            Username
+            <input type="text" name="username" autocomplete="username" required>
+          </label>
+          <label>
+            Password
+            <input type="password" name="password" autocomplete="current-password" required>
+          </label>
+          <button class="primary" type="submit">Sign in</button>
+          <p class="form-status" id="login-status"></p>
+        </form>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/login.js"></script>

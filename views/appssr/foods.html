@@ -1,0 +1,120 @@
+<div class="ambient"></div>
+{{{header}}}
+<div class="ui-fill ui-scroll">
+  <main class="page">
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <h1>Food library</h1>
+          <p>Track store-bought foods without adding them to recipes.</p>
+        </div>
+        <div class="panel-actions">
+          <button class="primary" type="button" data-scan-trigger data-scan-target="food">Scan barcode</button>
+        </div>
+      </div>
+      <div class="panel-body split">
+        <form id="food-form" class="stacked-card">
+          <h3 id="food-form-title">Add food</h3>
+          <input id="food-id" type="hidden" name="id">
+          <div class="grid two">
+            <label>
+              Name
+              <input type="text" name="name" required>
+            </label>
+            <label>
+              Barcode
+              <div class="field-row">
+                <input id="food-barcode-input" type="text" name="barcode">
+                <button class="ghost" id="food-barcode-lookup" type="button">Lookup</button>
+              </div>
+            </label>
+            <label>
+              Unit (g, ml, tbsp, piece)
+              <input type="text" name="unit" required>
+            </label>
+            <label>
+              Serving size (label)
+              <input type="text" name="servingSize" placeholder="1 cup (240 ml)">
+            </label>
+            <label>
+              Servings per container
+              <input type="text" name="servingsPerContainer" placeholder="about 8">
+            </label>
+          </div>
+          <div class="form-section">
+            <h4>Nutrition facts per unit</h4>
+            <div class="grid three">
+              <label>
+                Calories
+                <input type="number" name="calories" step="0.01" required>
+              </label>
+              <label>
+                Total fat (g)
+                <input type="number" name="fat" step="0.01" required>
+              </label>
+              <label>
+                Total carbs (g)
+                <input type="number" name="carbs" step="0.01" required>
+              </label>
+              <label>
+                Protein (g)
+                <input type="number" name="protein" step="0.01" required>
+              </label>
+            </div>
+            <div class="add-nutrient-row">
+              <label>
+                Additional facts
+                <select id="food-extra-nutrient-select"></select>
+              </label>
+              <button class="ghost" id="add-food-nutrient" type="button">Add nutrient</button>
+            </div>
+            <div class="grid three" id="food-extra-nutrients"></div>
+          </div>
+          <label>
+            Ingredients list
+            <textarea name="ingredientsList" rows="3"></textarea>
+          </label>
+          <label>
+            Other vitamins &amp; minerals
+            <textarea name="vitamins" rows="2"></textarea>
+          </label>
+          <label>
+            Allergens
+            <textarea name="allergens" rows="2"></textarea>
+          </label>
+          <div class="form-actions">
+            <button class="primary" id="food-submit" type="submit">Save food</button>
+            <button class="ghost" id="food-cancel" type="button" hidden>Cancel edit</button>
+          </div>
+          <p class="form-status" id="food-status"></p>
+        </form>
+        <div>
+          <div class="panel-tools">
+            <input id="food-search" type="search" placeholder="Search foods">
+          </div>
+          <div class="list scroll" id="food-list"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="modal" id="scan-modal" aria-hidden="true">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h3>Scan barcode</h3>
+      <button class="ghost" id="close-scan" type="button">Close</button>
+    </div>
+    <div class="scan-area">
+      <video id="scan-video" autoplay playsinline></video>
+      <div class="scan-target"></div>
+    </div>
+    <p class="form-status" id="scan-status"></p>
+  </div>
+</div>
+
+{{{cardTemplates}}}
+{{{confirmModal}}}
+
+<script src="https://unpkg.com/@zxing/library@0.21.2/umd/index.min.js"></script>
+<script src="/app.js"></script>

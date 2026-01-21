@@ -1,0 +1,84 @@
+<div class="ambient"></div>
+{{{header}}}
+<div class="ui-fill ui-scroll">
+  <main class="page">
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <h2>Daily overview</h2>
+          <p>Macros and calories for your selected day.</p>
+        </div>
+      </div>
+      <div class="hero-grid">
+        {{{caloriesPanel}}}
+        {{{macroSplitPanel}}}
+      </div>
+    </section>
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <h1>Log intake</h1>
+          <p>Record meals or single products with full nutrition info.</p>
+        </div>
+      </div>
+      <div class="panel-body split">
+        <form id="log-form" class="stacked-card" style="height: fit-content;">
+          <h3>Add log entry</h3>
+          <div class="toggle" role="radiogroup" aria-label="Log type">
+            <label>
+              <input type="radio" name="entryType" value="food" checked>
+              Food
+            </label>
+            <label>
+              <input type="radio" name="entryType" value="recipe">
+              Recipe
+            </label>
+            <label>
+              <input type="radio" name="entryType" value="ingredient">
+              Ingredient
+            </label>
+          </div>
+          <label>
+            Item
+            <select id="log-item" name="itemId"></select>
+          </label>
+          <div class="grid two">
+            <label>
+              Quantity
+              <input type="number" name="quantity" step="0.01" value="1">
+            </label>
+            <label>
+              Unit
+              <input type="text" name="unit" placeholder="auto">
+            </label>
+          </div>
+          <label>
+            Notes
+            <textarea name="notes" rows="2"></textarea>
+          </label>
+          <button class="primary" type="submit">Log intake</button>
+          <p class="form-status" id="log-status"></p>
+        </form>
+        <div>
+          <div class="panel-tools">
+            <div class="date-controls">
+              <button class="ghost day-nav" type="button" data-day-action="prev" aria-label="Previous day">Prev</button>
+              <label class="date-picker">
+                Day
+                <input id="log-date-filter" type="date" data-day-input>
+              </label>
+              <button class="ghost day-nav" type="button" data-day-action="next" aria-label="Next day">Next</button>
+              <button class="ghost" type="button" data-day-action="today">Today</button>
+            </div>
+          </div>
+          <div class="list scroll" id="log-list"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+{{{confirmModal}}}
+{{{cardTemplates}}}
+
+<script src="/app.js"></script>

@@ -941,22 +941,27 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  height: 100%;
   max-height: 100%;
   min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
-#recipe-builder-panel {
+#recipe-editor-panel {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  height: calc(100vh - var(--list-scroll-offset));
   max-height: calc(100vh - var(--list-scroll-offset));
 }
 
-#recipe-builder-panel .panel-body {
+#recipe-editor-panel .panel-body {
   min-height: 0;
+  height: 100%;
   overflow: hidden;
 }
 
-#recipe-builder-panel #recipe-form {
+#recipe-editor-panel #recipe-form {
   max-height: 100%;
   min-height: 0;
   overflow-y: auto;
@@ -966,9 +971,9 @@ textarea {
 #recipe-ingredients-panel {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: visible;
   min-height: 0;
-  flex: 1 1 auto;
+  flex: 0 0 auto;
 }
 
 #recipe-list-panel[hidden],
@@ -978,9 +983,13 @@ textarea {
 
 #recipe-list-panel .list.scroll,
 #recipe-ingredients-panel .list.scroll {
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 0 0 auto;
+  min-height: auto;
   max-height: none;
+  overflow-x: visible;
+  overflow-y: visible;
+  padding-right: 0;
+  scrollbar-gutter: auto;
 }
 
 .panel-tabs {
