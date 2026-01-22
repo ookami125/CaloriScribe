@@ -74,9 +74,22 @@ const elements = {
   dayInputs: qsa("[data-day-input]"),
   dayActionButtons: qsa("[data-day-action]"),
   scanModal: qs("#scan-modal"),
+  scanArea: qs("#scan-area"),
   scanVideo: qs("#scan-video"),
   scanStatus: qs("#scan-status"),
   closeScan: qs("#close-scan"),
+  scanUploadOpen: qs("#scan-upload-open"),
+  scanUploadModal: qs("#scan-upload-modal"),
+  scanUploadClose: qs("#scan-upload-close"),
+  scanUploadBack: qs("#scan-upload-back"),
+  scanUploadStatus: qs("#scan-upload-status"),
+  scanImageInput: qs("#scan-image-input"),
+  scanImagePreview: qs("#scan-image-preview"),
+  scanImageStage: qs("#scan-image-stage"),
+  scanImage: qs("#scan-image"),
+  scanImageZoom: qs("#scan-image-zoom"),
+  scanImageReset: qs("#scan-image-reset"),
+  scanImageScan: qs("#scan-image-scan"),
   confirmModal: qs("#confirm-modal"),
   confirmTitle: qs("#confirm-title"),
   confirmMessage: qs("#confirm-message"),
@@ -3386,6 +3399,40 @@ const lookupFoodBarcode = async (barcode) => {
   );
 };
 
+const createFoodFromBarcode = async (barcode) => {
+  const response = await api(
+    `/api/barcode-lookup?barcode=${encodeURIComponent(barcode)}&type=food`
+  );
+  if (!response || !response.food) {
+    throw new Error("No product found for that barcode.");
+  }
+  if (response.source === "local" && response.food?.id) {
+    return response.food;
+  }
+  const created = await api("/api/foods", {
+    method: "POST",
+    body: response.food,
+  });
+  return created;
+};
+
+const logFoodIntake = async (food) => {
+  if (!food?.id) {
+    throw new Error("Food is missing an id.");
+  }
+  const selectedDate = getSelectedDate();
+  const now = new Date();
+  const payload = {
+    quantity: 1,
+    unit: food.unit || "serving",
+    notes: "",
+    consumedAt: now.getTime(),
+    intakeDate: toDateInputValue(selectedDate || now),
+    foodId: food.id,
+  };
+  await api("/api/logs", { method: "POST", body: payload });
+};
+
 const handleFoodBarcodeDetected = async (barcode) => {
   if (elements.foodBarcodeInput) {
     elements.foodBarcodeInput.value = barcode;
@@ -3410,6 +3457,24 @@ const handleFoodBarcodeDetected = async (barcode) => {
   }
 };
 
+const handleQuickLogFoodBarcodeDetected = async (barcode) => {
+  setStatus(elements.scanStatus, `Detected barcode ${barcode}`);
+  let food = findFoodByBarcode(barcode);
+  try {
+    if (!food) {
+      setStatus(elements.scanStatus, "Looking up barcode...");
+      food = await createFoodFromBarcode(barcode);
+    }
+    setStatus(elements.scanStatus, `Logging ${food.name || "food"}...`);
+    await logFoodIntake(food);
+    await refreshData();
+    setStatus(elements.scanStatus, `Logged ${food.name || "food"}.`);
+  } catch (error) {
+    setStatus(elements.scanStatus, error.message, "error");
+    throw error;
+  }
+};
+
 const handleRecipeIngredientBarcodeDetected = (barcode) => {
   setRecipePanelMode("ingredients");
   if (elements.recipeIngredientSearch) {
@@ -3428,6 +3493,27 @@ const setupScan = () => {
   let detector = null;
   let zxingReader = null;
   let scanTarget = "ingredient";
+  const imageState = {
+    scale: 1,
+    minScale: 1,
+    maxScale: 4,
+    translateX: 0,
+    translateY: 0,
+    dragging: false,
+    dragOffsetX: 0,
+    dragOffsetY: 0,
+  };
+
+  const ensureZxingReader = () => {
+    const ZXing = window.ZXing;
+    if (!ZXing) {
+      return null;
+    }
+    if (!zxingReader) {
+      zxingReader = new ZXing.BrowserMultiFormatReader();
+    }
+    return zxingReader;
+  };
 
   const stopVideoStream = () => {
     const mediaStream = elements.scanVideo.srcObject;
@@ -3450,6 +3536,28 @@ const setupScan = () => {
     stopVideoStream();
   };
 
+  const applyImageTransform = () => {
+    if (!elements.scanImage) {
+      return;
+    }
+    elements.scanImage.style.transform = `translate(-50%, -50%) translate(${imageState.translateX}px, ${imageState.translateY}px) scale(${imageState.scale})`;
+  };
+
+  const resetImageTransform = (baseScale = 1) => {
+    imageState.scale = baseScale;
+    imageState.minScale = baseScale;
+    imageState.maxScale = baseScale * 4;
+    imageState.translateX = 0;
+    imageState.translateY = 0;
+    if (elements.scanImageZoom) {
+      elements.scanImageZoom.min = String(imageState.minScale);
+      elements.scanImageZoom.max = String(imageState.maxScale);
+      elements.scanImageZoom.step = "0.01";
+      elements.scanImageZoom.value = String(imageState.scale);
+    }
+    applyImageTransform();
+  };
+
   const scanLoop = async () => {
     if (!active || !detector) {
       return;
@@ -3461,6 +3569,8 @@ const setupScan = () => {
         const barcode = barcodes[0].rawValue;
         if (scanTarget === "food") {
           await handleFoodBarcodeDetected(barcode);
+        } else if (scanTarget === "quick-log-food") {
+          await handleQuickLogFoodBarcodeDetected(barcode);
         } else if (scanTarget === "recipe-ingredient") {
           handleRecipeIngredientBarcodeDetected(barcode);
         } else {
@@ -3507,7 +3617,15 @@ const setupScan = () => {
     }
 
     try {
-      zxingReader = new ZXing.BrowserMultiFormatReader();
+      zxingReader = ensureZxingReader();
+      if (!zxingReader) {
+        setStatus(
+          elements.scanStatus,
+          "Barcode scanning is not available here. Try Chrome or enable camera access.",
+          "error"
+        );
+        return;
+      }
       active = true;
       setStatus(elements.scanStatus, "Scanning...");
       await zxingReader.decodeFromVideoDevice(
@@ -3521,6 +3639,8 @@ const setupScan = () => {
             const barcode = result.getText();
             if (scanTarget === "food") {
               await handleFoodBarcodeDetected(barcode);
+            } else if (scanTarget === "quick-log-food") {
+              await handleQuickLogFoodBarcodeDetected(barcode);
             } else if (scanTarget === "recipe-ingredient") {
               handleRecipeIngredientBarcodeDetected(barcode);
             } else {
@@ -3548,6 +3668,66 @@ const setupScan = () => {
     }
   };
 
+  const handleImageFile = async (file) => {
+    if (!file) {
+      return;
+    }
+    const reader = new FileReader();
+    const dataUrl = await new Promise((resolve, reject) => {
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+    return dataUrl;
+  };
+
+  const getUploadStatusElement = () =>
+    elements.scanUploadStatus || elements.scanStatus;
+
+  const decodePreviewImage = async () => {
+    const zxing = ensureZxingReader();
+    if (!zxing) {
+      throw new Error("Image barcode scanning is not available.");
+    }
+    if (!elements.scanImageStage || !elements.scanImage) {
+      throw new Error("Image preview is not available.");
+    }
+    const img = elements.scanImage;
+    if (!img.complete || !img.naturalWidth) {
+      throw new Error("Image is still loading.");
+    }
+    const stage = elements.scanImageStage;
+    const width = stage.clientWidth || 0;
+    const height = stage.clientHeight || 0;
+    if (!width || !height) {
+      throw new Error("Image preview is not ready yet.");
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, width, height);
+    ctx.translate(width / 2 + imageState.translateX, height / 2 + imageState.translateY);
+    ctx.scale(imageState.scale, imageState.scale);
+    ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+    if (typeof zxing.decodeFromImageElement === "function") {
+      const temp = new Image();
+      temp.src = canvas.toDataURL("image/png");
+      await new Promise((resolve, reject) => {
+        temp.onload = resolve;
+        temp.onerror = () => reject(new Error("Unable to read the image."));
+      });
+      return zxing.decodeFromImageElement(temp);
+    }
+    if (typeof zxing.decodeFromCanvas === "function") {
+      return zxing.decodeFromCanvas(canvas);
+    }
+    if (typeof zxing.decodeFromImage === "function") {
+      return zxing.decodeFromImage(canvas);
+    }
+    throw new Error("Image barcode scanning is not available.");
+  };
+
   const openScanModal = async () => {
     elements.scanModal.classList.add("open");
     elements.scanModal.setAttribute("aria-hidden", "false");
@@ -3560,6 +3740,40 @@ const setupScan = () => {
     stopScan();
   };
 
+  const resetUploadPreview = () => {
+    if (elements.scanImageInput) {
+      elements.scanImageInput.value = "";
+    }
+    if (elements.scanImagePreview) {
+      elements.scanImagePreview.hidden = true;
+    }
+    if (elements.scanImage) {
+      elements.scanImage.src = "";
+    }
+  };
+
+  const openUploadModal = () => {
+    if (!elements.scanUploadModal) {
+      return;
+    }
+    closeScanModal();
+    resetUploadPreview();
+    elements.scanUploadModal.classList.add("open");
+    elements.scanUploadModal.setAttribute("aria-hidden", "false");
+  };
+
+  const closeUploadModal = (returnToScan = false) => {
+    if (!elements.scanUploadModal) {
+      return;
+    }
+    elements.scanUploadModal.classList.remove("open");
+    elements.scanUploadModal.setAttribute("aria-hidden", "true");
+    resetUploadPreview();
+    if (returnToScan) {
+      openScanModal();
+    }
+  };
+
   qsa("[data-scan-trigger]").forEach((button) => {
     button.addEventListener("click", async () => {
       scanTarget = button.dataset.scanTarget || "ingredient";
@@ -3567,6 +3781,123 @@ const setupScan = () => {
     });
   });
   elements.closeScan.addEventListener("click", closeScanModal);
+  if (elements.scanUploadOpen) {
+    elements.scanUploadOpen.addEventListener("click", openUploadModal);
+  }
+  if (elements.scanUploadClose) {
+    elements.scanUploadClose.addEventListener("click", () =>
+      closeUploadModal(false)
+    );
+  }
+  if (elements.scanUploadBack) {
+    elements.scanUploadBack.addEventListener("click", () =>
+      closeUploadModal(true)
+    );
+  }
+
+  if (elements.scanImageInput) {
+    elements.scanImageInput.addEventListener("change", async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) {
+        return;
+      }
+      try {
+        setStatus(getUploadStatusElement(), "Loading image...");
+        const dataUrl = await handleImageFile(file);
+        if (!elements.scanImage) {
+          throw new Error("Image preview is not available.");
+        }
+        stopScan();
+        elements.scanImage.onload = () => {
+          const stage = elements.scanImageStage;
+          const stageWidth = stage?.clientWidth || 1;
+          const stageHeight = stage?.clientHeight || 1;
+          const scaleX = stageWidth / elements.scanImage.naturalWidth;
+          const scaleY = stageHeight / elements.scanImage.naturalHeight;
+          const baseScale = Math.min(scaleX, scaleY, 1);
+          resetImageTransform(baseScale);
+        };
+        elements.scanImage.src = dataUrl;
+        if (elements.scanImagePreview) {
+          elements.scanImagePreview.hidden = false;
+        }
+        setStatus(getUploadStatusElement(), "Position the image, then scan.");
+      } catch (error) {
+        setStatus(getUploadStatusElement(), error.message, "error");
+      }
+    });
+  }
+
+  if (elements.scanImageZoom) {
+    elements.scanImageZoom.addEventListener("input", (event) => {
+      const value = Number(event.target.value);
+      if (!Number.isFinite(value)) {
+        return;
+      }
+      imageState.scale = value;
+      applyImageTransform();
+    });
+  }
+
+  if (elements.scanImageReset) {
+    elements.scanImageReset.addEventListener("click", () => {
+      resetImageTransform(imageState.minScale);
+    });
+  }
+
+  if (elements.scanImageStage && elements.scanImage) {
+    const handlePointerDown = (event) => {
+      event.preventDefault();
+      imageState.dragging = true;
+      elements.scanImage.classList.add("dragging");
+      imageState.dragOffsetX = event.clientX - imageState.translateX;
+      imageState.dragOffsetY = event.clientY - imageState.translateY;
+    };
+    const handlePointerMove = (event) => {
+      if (!imageState.dragging) {
+        return;
+      }
+      imageState.translateX = event.clientX - imageState.dragOffsetX;
+      imageState.translateY = event.clientY - imageState.dragOffsetY;
+      applyImageTransform();
+    };
+    const handlePointerUp = () => {
+      if (!imageState.dragging) {
+        return;
+      }
+      imageState.dragging = false;
+      elements.scanImage.classList.remove("dragging");
+    };
+    elements.scanImageStage.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+  }
+
+  if (elements.scanImageScan) {
+    elements.scanImageScan.addEventListener("click", async () => {
+      try {
+        setStatus(getUploadStatusElement(), "Scanning image...");
+        const result = await decodePreviewImage();
+        const barcode = result?.getText ? result.getText() : result?.text;
+        if (!barcode) {
+          throw new Error("No barcode detected in that image.");
+        }
+        if (scanTarget === "food") {
+          await handleFoodBarcodeDetected(barcode);
+        } else if (scanTarget === "quick-log-food") {
+          await handleQuickLogFoodBarcodeDetected(barcode);
+        } else if (scanTarget === "recipe-ingredient") {
+          handleRecipeIngredientBarcodeDetected(barcode);
+        } else {
+          await handleBarcodeDetected(barcode);
+        }
+        closeScanModal();
+      } catch (error) {
+        setStatus(getUploadStatusElement(), error.message, "error");
+      }
+    });
+  }
 };
 
 const setupNavToggle = () => {

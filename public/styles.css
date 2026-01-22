@@ -1093,6 +1093,58 @@ textarea {
   pointer-events: none;
 }
 
+.scan-image-preview {
+  display: grid;
+  gap: 12px;
+}
+
+.scan-image-stage {
+  position: relative;
+  border-radius: 18px;
+  overflow: hidden;
+  border: 2px solid rgba(20, 19, 22, 0.2);
+  height: 320px;
+  background: rgba(12, 13, 18, 0.7);
+  touch-action: none;
+}
+
+.scan-image-stage img {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(1);
+  transform-origin: center;
+  max-width: none;
+  user-select: none;
+  cursor: grab;
+}
+
+.scan-image-stage img.dragging {
+  cursor: grabbing;
+}
+
+.scan-image-controls {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.scan-image-controls .field {
+  display: grid;
+  gap: 6px;
+}
+
+.scan-image-controls input[type="range"] {
+  width: 180px;
+}
+
+.scan-image-actions {
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
+}
+
 .footer {
   padding: 20px clamp(18px, 4vw, 60px) 40px;
   color: var(--muted);
