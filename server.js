@@ -189,6 +189,7 @@ const buildTemplateData = (res, active) => ({
   cardTemplates: renderPartial(res, "card-templates.html"),
   confirmModal: renderPartial(res, "confirm-modal.html"),
   editTargetModal: renderPartial(res, "edit-target-modal.html"),
+  unitChangeModal: renderPartial(res, "unit-change-modal.html"),
 });
 
 const renderPage = (res, view, { title, active } = {}) => {

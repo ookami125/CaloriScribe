@@ -24,6 +24,7 @@ const elements = {
   ingredientCancel: qs("#ingredient-cancel"),
   barcodeInput: qs("#barcode-input"),
   barcodeLookup: qs("#barcode-lookup"),
+  ingredientUnitChange: qs("#ingredient-unit-change"),
   extraNutrientSelect: qs("#extra-nutrient-select"),
   extraNutrients: qs("#extra-nutrients"),
   addNutrient: qs("#add-nutrient"),
@@ -37,6 +38,7 @@ const elements = {
   foodCancel: qs("#food-cancel"),
   foodBarcodeInput: qs("#food-barcode-input"),
   foodBarcodeLookup: qs("#food-barcode-lookup"),
+  foodUnitChange: qs("#food-unit-change"),
   foodExtraNutrientSelect: qs("#food-extra-nutrient-select"),
   foodExtraNutrients: qs("#food-extra-nutrients"),
   addFoodNutrient: qs("#add-food-nutrient"),
@@ -86,6 +88,12 @@ const elements = {
   editTargetSave: qs("#edit-target-save"),
   editTargetCancel: qs("#edit-target-cancel"),
   editTargetClose: qs("#edit-target-close"),
+  unitChangeModal: qs("#unit-change-modal"),
+  unitChangeTitle: qs("#unit-change-title"),
+  unitChangeInput: qs("#unit-change-input"),
+  unitChangeSave: qs("#unit-change-save"),
+  unitChangeCancel: qs("#unit-change-cancel"),
+  unitChangeClose: qs("#unit-change-close"),
   logoutButton: qs("#logout-button"),
   exportButton: qs("#export-button"),
   importButton: qs("#import-button"),
@@ -431,6 +439,88 @@ const confirmDialog = ({
     document.addEventListener("keydown", handleKeydown);
 
     requestAnimationFrame(() => acceptButton.focus());
+  });
+};
+
+const unitChangeDialog = ({
+  title = "Change unit",
+  value = "",
+  confirmText = "Update",
+} = {}) => {
+  const modal = elements.unitChangeModal;
+  const titleEl = elements.unitChangeTitle;
+  const input = elements.unitChangeInput;
+  const saveButton = elements.unitChangeSave;
+  const cancelButton = elements.unitChangeCancel;
+  const closeButton = elements.unitChangeClose;
+
+  if (!modal || !input || !saveButton || !cancelButton) {
+    return Promise.resolve(null);
+  }
+
+  if (titleEl) {
+    titleEl.textContent = title;
+  }
+  input.value = value;
+  saveButton.textContent = confirmText;
+
+  modal.classList.add("open");
+  modal.setAttribute("aria-hidden", "false");
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const handleSave = () => {
+      input.value = input.value.trim();
+      if (!input.reportValidity()) {
+        return;
+      }
+      close(input.value);
+    };
+    const handleCancel = () => close(null);
+    const handleBackdrop = (event) => {
+      if (event.target === modal) {
+        close(null);
+      }
+    };
+    const handleKeydown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close(null);
+      }
+      if (event.key === "Enter" && event.target === input) {
+        event.preventDefault();
+        handleSave();
+      }
+    };
+    const cleanup = () => {
+      saveButton.removeEventListener("click", handleSave);
+      cancelButton.removeEventListener("click", handleCancel);
+      if (closeButton) {
+        closeButton.removeEventListener("click", handleCancel);
+      }
+      modal.removeEventListener("click", handleBackdrop);
+      document.removeEventListener("keydown", handleKeydown);
+    };
+    const close = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      modal.classList.remove("open");
+      modal.setAttribute("aria-hidden", "true");
+      cleanup();
+      resolve(result);
+    };
+
+    saveButton.addEventListener("click", handleSave);
+    cancelButton.addEventListener("click", handleCancel);
+    if (closeButton) {
+      closeButton.addEventListener("click", handleCancel);
+    }
+    modal.addEventListener("click", handleBackdrop);
+    document.addEventListener("keydown", handleKeydown);
+
+    requestAnimationFrame(() => input.focus());
   });
 };
 
@@ -789,6 +879,14 @@ const formatNumber = (value, precision = 1) => {
   return value.toFixed(precision).replace(/\.0$/, "");
 };
 
+const roundNutrientValue = (value) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return value;
+  }
+  return Math.round(parsed * 100) / 100;
+};
+
 const parseNumeric = (value, fallback = 0) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -866,20 +964,20 @@ const applyLibraryFieldValues = (setter, data, options = {}) => {
   const targetKeys = getTrackedTargetKeys();
   if (targetKeys.length) {
     targetKeys.forEach((key) => {
-      setter(key, data?.[key], options);
+      setter(key, roundNutrientValue(data?.[key]), options);
     });
     return;
   }
   Object.keys(data || {}).forEach((key) => {
     if (typeof data?.[key] === "number") {
-      setter(key, data?.[key], options);
+      setter(key, roundNutrientValue(data?.[key]), options);
     }
   });
 };
 
 const buildExtraNutrientValues = (data) =>
   CUSTOM_TARGET_OPTIONS.reduce((values, option) => {
-    values[option.key] = data?.[option.key];
+    values[option.key] = roundNutrientValue(data?.[option.key]);
     return values;
   }, {});
 
@@ -1167,6 +1265,23 @@ const getUnitMultiplier = (fromLabel, toLabel) => {
   return fromBase / toBase;
 };
 
+const applyUnitMultiplierToForm = (form, multiplier) => {
+  if (!form || !Number.isFinite(multiplier)) {
+    return;
+  }
+  form.querySelectorAll("input[type='number']").forEach((input) => {
+    const raw = input.value;
+    if (raw === "") {
+      return;
+    }
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+    input.value = roundNutrientValue(parsed * multiplier);
+  });
+};
+
 const normalizeIngredientQuantity = (ingredient, quantity, unit) => {
   if (!ingredient) {
     return { quantity, unit: unit || "" };
@@ -1393,7 +1508,7 @@ const createExtraField = (name, value = "") => {
   const input = document.createElement("input");
   input.name = config.name;
   input.type = "number";
-  input.step = config.step || "1";
+  input.step = config.step || "any";
   input.value = value ?? "";
 
   label.appendChild(input);
@@ -1486,7 +1601,7 @@ const createFoodExtraField = (name, value = "") => {
   const input = document.createElement("input");
   input.name = config.name;
   input.type = "number";
-  input.step = config.step || "1";
+  input.step = config.step || "any";
   input.value = value ?? "";
 
   label.appendChild(input);
@@ -3486,6 +3601,47 @@ const wireForms = () => {
     applySelectedDayValue(value);
   };
 
+  const handleUnitChange = async (form, statusEl) => {
+    if (!form) {
+      return;
+    }
+    const unitInput = form.querySelector("[name='unit']");
+    if (!unitInput) {
+      return;
+    }
+    const currentUnit = String(unitInput.value || "").trim();
+    const requested = await unitChangeDialog({
+      title: "Change unit",
+      value: currentUnit,
+      confirmText: "Update",
+    });
+    if (requested === null) {
+      return;
+    }
+    const nextUnit = String(requested || "").trim();
+    if (!nextUnit) {
+      setStatus(statusEl, "Enter a unit to update.", "error");
+      return;
+    }
+    if (!currentUnit) {
+      unitInput.value = nextUnit;
+      setStatus(statusEl, `Unit set to ${nextUnit}.`);
+      return;
+    }
+    const multiplier = getUnitMultiplier(nextUnit, currentUnit);
+    if (multiplier === null || !Number.isFinite(multiplier)) {
+      setStatus(
+        statusEl,
+        `Unit ${nextUnit} is not compatible with ${currentUnit}.`,
+        "error"
+      );
+      return;
+    }
+    applyUnitMultiplierToForm(form, multiplier);
+    unitInput.value = nextUnit;
+    setStatus(statusEl, `Updated nutrition values for ${nextUnit}.`);
+  };
+
   if (elements.ingredientForm) {
     elements.ingredientForm.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -3519,6 +3675,12 @@ const wireForms = () => {
     elements.ingredientCancel.addEventListener("click", () => {
       setIngredientFormMode(null);
       setStatus(elements.ingredientStatus, "Edit cancelled.");
+    });
+  }
+
+  if (elements.ingredientUnitChange) {
+    elements.ingredientUnitChange.addEventListener("click", () => {
+      handleUnitChange(elements.ingredientForm, elements.ingredientStatus);
     });
   }
 
@@ -3612,6 +3774,12 @@ const wireForms = () => {
     elements.foodCancel.addEventListener("click", () => {
       setFoodFormMode(null);
       setStatus(elements.foodStatus, "Edit cancelled.");
+    });
+  }
+
+  if (elements.foodUnitChange) {
+    elements.foodUnitChange.addEventListener("click", () => {
+      handleUnitChange(elements.foodForm, elements.foodStatus);
     });
   }
 

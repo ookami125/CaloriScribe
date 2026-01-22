@@ -30,7 +30,10 @@
             </label>
             <label>
               Unit (g, ml, tbsp, piece)
-              <input type="text" name="unit" required>
+              <div class="field-row">
+                <input type="text" name="unit" required>
+                <button class="ghost" id="food-unit-change" type="button">Change</button>
+              </div>
             </label>
             <label>
               Serving size (label)
@@ -115,6 +118,7 @@
 
 {{{cardTemplates}}}
 {{{confirmModal}}}
+{{{unitChangeModal}}}
 
 <script src="https://unpkg.com/@zxing/library@0.21.2/umd/index.min.js"></script>
 <script src="/app.js"></script>
